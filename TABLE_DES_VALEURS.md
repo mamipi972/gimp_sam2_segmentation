@@ -20,7 +20,7 @@ valeurs mesurées, et ils disent où.
 
 | Constante | Valeur | Nature | Rôle |
 | --- | --- | --- | --- |
-| `PLUGIN_VERSION` | 6.2 | déclarée | Version du greffon, consignée dans le marqueur d'environnement. Elle vit dans le code, jamais dans le nom du fichier. |
+| `PLUGIN_VERSION` | 6.3 | déclarée | Version du greffon, consignée dans le marqueur d'environnement. Elle vit dans le code, jamais dans le nom du fichier. |
 | `STACK_NAME` | onnx-cpu | déclarée | Nom de la pile technique. Il suffixe le venv, le marqueur et le cache d'interpréteur pour qu'un autre greffon de la suite ne réinstalle jamais par-dessus. |
 | `VENV_DIR_NAME` | venv-onnx-cpu | déclarée | Environnement virtuel dédié, sous le dossier de données volumineuses. |
 | `MARKER_FILE_NAME` | env_onnx-cpu.json | déclarée | Marqueur d'environnement, sous `Gimp.directory()`. |

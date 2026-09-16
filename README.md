@@ -18,9 +18,11 @@ ni de supprimer un dossier.**
 
    | Système | Chemin |
    | --- | --- |
-   | Windows | `%APPDATA%\GIMP\3.0\plug-ins\` |
-   | Linux | `~/.config/GIMP/3.0/plug-ins/` |
-   | macOS | `~/Library/Application Support/GIMP/3.0/plug-ins/` |
+   | Windows | `%APPDATA%\GIMP\<version>\plug-ins\` |
+   | Linux | `~/.config/GIMP/<version>/plug-ins/` |
+   | macOS | `~/Library/Application Support/GIMP/<version>/plug-ins/` |
+
+   `<version>` est celle de votre GIMP : `3.0`, `3.2`...
 
    Le nom du fichier doit rester identique au nom de son dossier. Sur macOS et
    Linux, rendre le fichier exécutable (`chmod +x`).
@@ -154,8 +156,20 @@ restent, les volumineux vont ailleurs.
 
 | Contenu | Emplacement | Volume |
 | --- | --- | --- |
-| Environnement Python, modèles ONNX | `%LOCALAPPDATA%\GIMP\3.0\ai_suite_shared\` (Linux : `~/.local/share/...`, macOS : `~/Library/Application Support/...`) | plusieurs centaines de Mo |
+| Environnement Python, modèles ONNX | `%LOCALAPPDATA%\GIMP\ai_suite_shared\` (Linux : `~/.local/share/GIMP/ai_suite_shared/`, macOS : `~/Library/Application Support/GIMP/ai_suite_shared/`) | plusieurs centaines de Mo |
 | Marqueur, cache d'interpréteur, empreintes, journal, archives d'incidents, inventaire | `<dossier GIMP>\ai_suite_shared\` | quelques Ko |
+
+**Pour ouvrir le dossier des modèles sous Windows** : collez
+`%LOCALAPPDATA%\GIMP\ai_suite_shared\models` dans la barre d'adresse de
+l'explorateur. C'est **AppData\Local**, pas `AppData\Roaming` où vit le profil
+GIMP — un profil itinérant d'entreprise est synchronisé à chaque ouverture de
+session, et quelques gigaoctets y deviennent un incident d'exploitation.
+
+Ce dossier ne porte **pas** de numéro de version de GIMP : les poids ONNX et
+l'environnement Python n'en dépendent pas, et les indexer par version ferait
+tout retélécharger à chaque mise à jour de GIMP. Un dossier versionné laissé par
+une version antérieure du greffon (`GIMP\3.0\ai_suite_shared`) est repris par
+simple renommage, sans nouveau téléchargement.
 
 L'inventaire `inventaire_gimp_sam2_segment.json` liste les modèles présents et
 leur volume total. Un greffon qui fonctionne peut gaspiller en silence : sans
@@ -174,6 +188,7 @@ renommage, sans nouveau téléchargement.
 | Mode d'extraction | Autonome | `Autonome` garde tous les éléments distincts trouvés ; `Limite manuelle` applique le nombre ci-dessous. |
 | Nombre maximum d'éléments | 5 | Utilisé seulement en mode `Limite manuelle`. |
 | Variante du modèle | Automatique | Impose une variante au lieu du choix adaptatif. |
+| Ajouter un calque pour le fond | coché | Ajoute, sous les éléments, un calque contenant tout ce qui n'a pas été détouré. C'est le complément exact des éléments : chaque pixel de l'image appartient à un calque et un seul, sans trou ni recouvrement. |
 | Télécharger les modèles manquants | coché | Décoché, le greffon n'émet **aucune requête réseau** et se contente de ce qui est déjà sur le disque. |
 | Réinstaller l'environnement IA | décoché | Reconstruit l'environnement Python. C'est la sortie prévue d'un environnement cassé : aucun geste sur les fichiers n'est nécessaire. |
 
@@ -225,7 +240,7 @@ reconstruit et relance une fois, sans rien demander.
   téléchargement et de segmentation restent des cases vides dans la table des
   valeurs, et le resteront tant qu'une exécution réelle ne les aura pas
   remplies.
-- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 114
+- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 128
   contrôles automatiques hors de GIMP (voir ci-dessous), dont une inférence
   complète contre un double d'`onnxruntime`. Les chemins qui touchent l'API GIMP
   elle-même — export du calque désigné, insertion des calques, fenêtre d'options
@@ -245,8 +260,8 @@ reconstruit et relance une fois, sans rien demander.
 python3 outils/tous_les_tests.py       # tout, avec un résumé et un code de retour
 
 python3 outils/verifier_livraison.py   # 13 contrôles de livraison + empreinte SHA-256
-python3 outils/tests_unitaires.py      # 72 contrôles, doublure GIMP + serveur HTTP local
-python3 outils/tests_worker.py         # 42 contrôles, inférence complète contre un double
+python3 outils/tests_unitaires.py      # 78 contrôles, doublure GIMP + serveur HTTP local
+python3 outils/tests_worker.py         # 50 contrôles, inférence complète contre un double
 ```
 
 `tests_unitaires.py` et `verifier_livraison.py` n'ont besoin de rien d'autre que

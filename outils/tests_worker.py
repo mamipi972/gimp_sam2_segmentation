@@ -280,6 +280,7 @@ class Bac:
             "points_grille": constante("POINTS_GRILLE"),
             "points_max": constante("POINTS_MAX"),
             "points_residuels": constante("POINTS_RESIDUELS"),
+            "extraire_fond": True,
             "taille_entree": constante("TAILLE_ENTREE_ENCODEUR"),
             "fournisseurs": ["CUDAExecutionProvider", "CPUExecutionProvider"],
         }
@@ -661,6 +662,67 @@ def test_plancher_de_score():
         bac.nettoyer()
 
 
+def test_calque_de_fond():
+    print("Cas 9 : le fond est rendu comme calque, complement exact des elements")
+    largeur, hauteur = 1280, 800
+    sujets = [(320, 250, 100, 45), (620, 600, 100, 45)]
+    formes_1024 = [[cx * 1024.0 / largeur, cy * 1024.0 / hauteur,
+                    rx * 1024.0 / largeur, ry * 1024.0 / hauteur]
+                   for cx, cy, rx, ry in sujets]
+    bac = Bac(scenario={"TEST_FORMES": json.dumps(formes_1024)})
+    try:
+        image = image_sujets_dans_grand_ciel(largeur, hauteur, sujets)
+        chemin = os.path.join(bac.dossier, "avec_fond.png")
+        cv2.imwrite(chemin, image)
+        sortie = bac.executer(bac.parametres(chemin,
+                                             roi=[False, 0, 0, largeur, hauteur]))
+        resultat = sortie["resultat"]
+        controler("statut succes", resultat.get("statut") == "succes",
+                  str(resultat)[:200])
+        chemin_fond = os.path.join(bac.dossier, resultat.get("fond") or "absent")
+        controler("un fichier de fond est produit", os.path.isfile(chemin_fond),
+                  str(resultat.get("fond")))
+        if not os.path.isfile(chemin_fond):
+            return
+        fond = cv2.imread(chemin_fond, cv2.IMREAD_UNCHANGED)
+        couverture = np.zeros((hauteur, largeur), dtype=np.int32)
+        for nom in sortie["sorties"]:
+            rgba = cv2.imread(os.path.join(bac.dossier, nom), cv2.IMREAD_UNCHANGED)
+            couverture += (rgba[:, :, 3] > 0).astype(np.int32)
+        couverture += (fond[:, :, 3] > 0).astype(np.int32)
+        controler("chaque pixel appartient a exactement un calque : aucun trou",
+                  int((couverture == 0).sum()) == 0,
+                  "%d pixel(s) sans calque" % int((couverture == 0).sum()))
+        controler("chaque pixel appartient a exactement un calque : aucun "
+                  "recouvrement", int((couverture > 1).sum()) == 0,
+                  "%d pixel(s) en double" % int((couverture > 1).sum()))
+        controler("le fond couvre l'essentiel de l'image",
+                  float(np.count_nonzero(fond[:, :, 3])) / (largeur * hauteur) > 0.90,
+                  "%.3f" % (float(np.count_nonzero(fond[:, :, 3])) / (largeur * hauteur)))
+        controler("les pixels du fond sont ceux de la source, intacts",
+                  np.array_equal(fond[:, :, :3][fond[:, :, 3] > 0],
+                                 image[fond[:, :, 3] > 0]))
+
+        # Option decochee : aucun fichier de fond.
+        bac2 = Bac(scenario={"TEST_FORMES": json.dumps(formes_1024)})
+        try:
+            chemin2 = os.path.join(bac2.dossier, "sans_fond.png")
+            cv2.imwrite(chemin2, image)
+            sortie2 = bac2.executer(bac2.parametres(
+                chemin2, roi=[False, 0, 0, largeur, hauteur], extraire_fond=False))
+            controler("l'option decochee ne produit aucun calque de fond",
+                      sortie2["resultat"].get("fond") is None
+                      and not os.path.isfile(os.path.join(bac2.dossier, "fond.png")),
+                      str(sortie2["resultat"].get("fond")))
+            controler("l'option decochee ne change rien aux elements",
+                      len(sortie2["sorties"]) == len(sortie["sorties"]),
+                      "%d contre %d" % (len(sortie2["sorties"]), len(sortie["sorties"])))
+        finally:
+            bac2.nettoyer()
+    finally:
+        bac.nettoyer()
+
+
 def main():
     print("Tests du worker SAM 2 (double d'onnxruntime, aucun modele reel)")
     print("")
@@ -671,6 +733,7 @@ def main():
     test_sujets_se_touchant()
     test_plancher_de_score()
     test_repli_inversion_du_fond()
+    test_calque_de_fond()
     test_sorties_en_echec()
     print("")
     echecs = [nom for nom, ok, _ in RESULTATS if not ok]

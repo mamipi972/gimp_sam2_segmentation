@@ -625,6 +625,47 @@ def test_espace_disque():
         bac.fermer()
 
 
+def test_dossier_de_donnees():
+    print("Emplacements : dossier de donnees sans numero de version")
+    bac = Bac()
+    m = bac.module
+    try:
+        # Poste deja installe sous un dossier versionne, comme en v6.2.
+        ancien = os.path.join(bac.donnees, "GIMP", "3.0", "ai_suite_shared")
+        os.makedirs(os.path.join(ancien, "models"), exist_ok=True)
+        temoin = os.path.join(ancien, "models", "sam2_hiera_tiny.encoder.onnx")
+        with open(temoin, "wb") as f:
+            f.write(faux_modele(6 * 1024 * 1024))
+        os.makedirs(os.path.join(ancien, "venv-onnx-cpu"), exist_ok=True)
+
+        dossier = m.get_data_dir()
+        controler("le dossier retenu ne porte pas de numero de version de GIMP",
+                  dossier == os.path.join(bac.donnees, "GIMP", "ai_suite_shared"),
+                  dossier)
+        controler("le modele deja telecharge suit la migration",
+                  os.path.isfile(os.path.join(dossier, "models",
+                                              "sam2_hiera_tiny.encoder.onnx")))
+        controler("l'environnement Python suit aussi",
+                  os.path.isdir(os.path.join(dossier, "venv-onnx-cpu")))
+        controler("l'ancien dossier versionne ne reste pas en double",
+                  not os.path.isdir(ancien), ancien)
+        controler("le modele migre est retrouve comme canonique",
+                  m.chercher_modele("sam2_hiera_tiny.encoder.onnx")[1] == "canonique",
+                  str(m.chercher_modele("sam2_hiera_tiny.encoder.onnx")))
+    finally:
+        bac.fermer()
+
+    # Poste neuf : aucun dossier versionne, rien a migrer.
+    bac = Bac()
+    try:
+        dossier = bac.module.get_data_dir()
+        controler("sur un poste neuf, le dossier est cree directement",
+                  os.path.isdir(os.path.join(dossier, "models"))
+                  and dossier.endswith("ai_suite_shared"), dossier)
+    finally:
+        bac.fermer()
+
+
 def main():
     print("Tests du greffon SAM 2 (doublure GIMP, serveur HTTP local)")
     print("")
@@ -636,6 +677,7 @@ def main():
     test_degradation_variante()
     test_selection_et_bornes()
     test_marqueur_et_migration()
+    test_dossier_de_donnees()
     test_journaux_et_messages()
     test_espace_disque()
     print("")

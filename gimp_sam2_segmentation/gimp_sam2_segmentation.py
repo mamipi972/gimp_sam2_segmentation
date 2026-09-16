@@ -41,7 +41,7 @@ if os.name == "nt":
 #    Toute valeur citee dans la documentation vient d'ici (voir
 #    TABLE_DES_VALEURS.md).
 # ==============================================================================
-PLUGIN_VERSION = "6.2"
+PLUGIN_VERSION = "6.3"
 PLUGIN_ID = "gimp_sam2_segment"
 PROCEDURE_NAME = "plug-in-sam2-segment"
 SHARED_DIR_NAME = "ai_suite_shared"
@@ -207,19 +207,61 @@ def octets_lisibles(n):
 #    Windows, Gimp.directory() vit dans AppData\Roaming, synchronise a chaque
 #    session sur un profil itinerant.
 # ==============================================================================
-def get_data_dir():
+_DOSSIER_DONNEES = None
+
+
+def base_donnees():
     if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-    data_dir = os.path.join(base, "GIMP", "3.0", SHARED_DIR_NAME)
+        return os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support")
+    return os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+
+
+def get_data_dir():
+    """Dossier des donnees volumineuses : environnement Python et modeles.
+
+    Il ne porte volontairement pas de numero de version de GIMP. Les poids ONNX
+    et le venv ne dependent pas de la version de GIMP : les indexer par
+    version ferait retelecharger plusieurs centaines de megaoctets a chaque
+    mise a jour, et laisserait l'ancien dossier immobilise sans que personne ne
+    le remarque. Un dossier versionne trouve ici est donc repris par simple
+    renommage.
+    """
+    global _DOSSIER_DONNEES
+    if _DOSSIER_DONNEES:
+        return _DOSSIER_DONNEES
+
+    base = base_donnees()
+    cible = os.path.join(base, "GIMP", SHARED_DIR_NAME)
+    if not os.path.isdir(cible):
+        racine = os.path.join(base, "GIMP")
+        anciens = []
+        try:
+            for entree in sorted(os.listdir(racine)):
+                if entree == SHARED_DIR_NAME:
+                    continue
+                candidat = os.path.join(racine, entree, SHARED_DIR_NAME)
+                if os.path.isdir(candidat):
+                    anciens.append(candidat)
+        except Exception:
+            anciens = []
+        if anciens:
+            ancien = anciens[0]
+            try:
+                os.rename(ancien, cible)
+                journal("dossier de donnees migre: %s -> %s" % (ancien, cible))
+            except Exception as e:
+                journal("migration du dossier de donnees impossible (%s), "
+                        "reprise sur place: %s" % (e, ancien))
+                cible = ancien
+
     try:
-        os.makedirs(os.path.join(data_dir, "models"), exist_ok=True)
+        os.makedirs(os.path.join(cible, "models"), exist_ok=True)
     except Exception:
         pass
-    return data_dir
+    _DOSSIER_DONNEES = cible
+    return cible
 
 
 def get_models_dir():
@@ -2248,35 +2290,53 @@ def run():
             alpha_plein = 255
             facteur = 1
 
-        fichiers = []
-        for index, item in enumerate(finaux):
-            masque_complet = np.zeros((hauteur, largeur), dtype=np.uint8)
-            masque_complet[y1:y2, x1:x2] = item["masque"]
-            canal_alpha = masque_complet.astype(np.uint32) * facteur
+        def ecrire_calque(masque_image, nom):
+            canal_alpha = masque_image.astype(np.uint32) * facteur
             if alpha_source is not None:
                 limite = alpha_source.astype(np.uint32)
                 if facteur == 1 and alpha_source.dtype == np.uint16:
                     limite = (limite / 257).astype(np.uint32)
                 canal_alpha = np.minimum(canal_alpha, limite)
             canal_alpha = canal_alpha.clip(0, alpha_plein).astype(profondeur)
-
             sortie_rgba = np.dstack([canaux_couleur.astype(profondeur), canal_alpha])
-            nom = "element_%03d.png" % index
             chemin_sortie = os.path.join(dossier, nom)
-            try:
-                if not cv2.imwrite(chemin_sortie, sortie_rgba):
-                    raise IOError("cv2.imwrite a refuse d'ecrire " + chemin_sortie)
-            except Exception as e:
-                sortir(dossier, "erreur_ecriture", "[ERR_ECRITURE]", CODE_ECRITURE,
-                       "ecriture du resultat impossible: " + str(e))
-                return
-            fichiers.append({"fichier": nom, "score": round(float(item["score"]), 4),
-                             "aire_pixels": int(item.get("aire", 0)),
-                             "point": item.get("point")})
+            if not cv2.imwrite(chemin_sortie, sortie_rgba):
+                raise IOError("cv2.imwrite a refuse d'ecrire " + chemin_sortie)
+
+        fichiers = []
+        union = np.zeros((hauteur, largeur), dtype=np.uint8)
+        try:
+            for index, item in enumerate(finaux):
+                masque_complet = np.zeros((hauteur, largeur), dtype=np.uint8)
+                masque_complet[y1:y2, x1:x2] = item["masque"]
+                union = np.maximum(union, masque_complet)
+                nom = "element_%03d.png" % index
+                ecrire_calque(masque_complet, nom)
+                fichiers.append({"fichier": nom, "score": round(float(item["score"]), 4),
+                                 "aire_pixels": int(item.get("aire", 0)),
+                                 "point": item.get("point")})
+
+            # Le fond est le complement exact des elements retenus, et non un
+            # masque rendu par le modele : chaque pixel de l'image appartient
+            # ainsi a un calque et un seul, sans trou ni recouvrement.
+            fond_fichier = None
+            aire_fond = 0
+            if cfg.get("extraire_fond"):
+                masque_fond = np.where(union > 0, 0, 255).astype(np.uint8)
+                aire_fond = int(np.count_nonzero(masque_fond))
+                if aire_fond > 0:
+                    fond_fichier = "fond.png"
+                    ecrire_calque(masque_fond, fond_fichier)
+        except Exception as e:
+            sortir(dossier, "erreur_ecriture", "[ERR_ECRITURE]", CODE_ECRITURE,
+                   "ecriture du resultat impossible: " + str(e))
+            return
 
         sortir(dossier, "succes", "[OK_RESULTAT]", CODE_OK,
                "%d element(s) exporte(s)" % len(fichiers),
                {"elements": fichiers,
+                "fond": fond_fichier,
+                "aire_fond_pixels": aire_fond,
                 "variante": cfg.get("variante"),
                 "moteur": os.path.basename(cfg.get("encodeur", "")),
                 "fournisseur": fournisseur_reel,
@@ -2410,6 +2470,9 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
             ("allow-download", "Telecharger les modeles manquants",
              "Telechargement automatique sous %s par fichier, taille annoncee "
              "avant de commencer" % octets_lisibles(AUTO_DOWNLOAD_MAX_BYTES), True),
+            ("add-background", "Ajouter un calque pour le fond",
+             "Ajoute sous les elements un calque contenant tout ce qui n'a pas "
+             "ete detoure", True),
             ("reinstall-env", "Reinstaller l'environnement IA",
              "Reconstruit l'environnement Python dedie. Plusieurs centaines de "
              "megaoctets seront telecharges.", False),
@@ -2445,6 +2508,7 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
         max_elements = int(lire_option(config, "max-elements", 5))
         variante_choisie = int(lire_option(config, "model-variant", 0))
         autoriser_telechargement = bool(lire_option(config, "allow-download", True))
+        extraire_fond = bool(lire_option(config, "add-background", True))
         reinstaller = bool(lire_option(config, "reinstall-env", False))
 
         dossier_travail = tempfile.mkdtemp(prefix=PLUGIN_ID + "_")
@@ -2502,6 +2566,7 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
                 "variante": variante,
                 "mode": mode,
                 "max_elements": max_elements,
+                "extraire_fond": extraire_fond,
                 "marge_ratio": MARGE_ROI_RATIO,
                 "marge_min_px": MARGE_ROI_MIN_PX,
                 "score_min": SCORE_MIN,
@@ -2571,6 +2636,19 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
             except Exception as e:
                 journal("groupe de calques indisponible: %s" % e)
                 groupe = None
+
+            # Le fond est insere en premier : chaque insertion suivante se
+            # place au-dessus, il se retrouve donc au bas de la pile.
+            nom_fond = resultat.get("fond")
+            if nom_fond:
+                chemin_fond = os.path.join(dossier_travail, nom_fond)
+                if os.path.isfile(chemin_fond) and os.path.getsize(chemin_fond) > 0:
+                    calque_fond = charger_calque(image, chemin_fond)
+                    try:
+                        calque_fond.set_name("Fond - %s" % etiquette)
+                    except Exception:
+                        pass
+                    image.insert_layer(calque_fond, groupe, -1)
 
             elements = resultat.get("elements") or []
             for index, nom_fichier in enumerate(fichiers):
