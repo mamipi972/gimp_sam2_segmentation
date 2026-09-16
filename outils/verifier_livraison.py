@@ -37,8 +37,7 @@ import unicodedata
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOSSIER_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation")
-FICHIER_GREFFON = os.path.join(DOSSIER_GREFFON, "gimp_sam2_segmentation.py")
+FICHIER_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation.py")
 TABLE_DES_VALEURS = os.path.join(RACINE, "TABLE_DES_VALEURS.md")
 
 echecs = []
@@ -162,14 +161,18 @@ def main():
     # 2. Fins de ligne.
     verifier(b"\r\n" not in brut and b"\r" not in brut, "fins de ligne LF pures")
 
-    # 3. Nom du fichier et du dossier.
+    # 3. Nom du fichier livre.
+    #
+    # GIMP exige que le fichier porte le nom de son dossier d'installation. Le
+    # depot, lui, garde le fichier a la racine : c'est le dossier
+    # plug-ins/<nom>/ cree a l'installation qui doit correspondre, ce qu'aucun
+    # controle ici ne peut verifier. On controle donc ce qui est verifiable :
+    # un nom neutre, utilisable tel quel comme nom de dossier.
     nom_fichier = os.path.basename(FICHIER_GREFFON)
-    nom_dossier = os.path.basename(DOSSIER_GREFFON)
-    verifier(nom_fichier == nom_dossier + ".py",
-             "nom de fichier identique au nom du dossier (%s / %s)"
-             % (nom_fichier, nom_dossier))
     verifier(re.match(r"^[a-z0-9_]+\.py$", nom_fichier) is not None,
              "nom de fichier neutre, sans accent, espace ni suffixe de version")
+    notes.append("  RAPPEL a l'installation, le fichier va dans "
+                 "plug-ins/%s/%s" % (nom_fichier[:-3], nom_fichier))
 
     # 4. Syntaxe du greffon et du worker.
     try:

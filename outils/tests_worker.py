@@ -36,8 +36,7 @@ import numpy as np
 import cv2
 
 RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FICHIER_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation",
-                               "gimp_sam2_segmentation.py")
+FICHIER_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation.py")
 
 RAYON_DISQUE_1024 = 120.0
 

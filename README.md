@@ -13,19 +13,23 @@ ni de supprimer un dossier.**
 
 ## Installation
 
-1. Copier le dossier `gimp_sam2_segmentation/` (celui qui contient
-   `gimp_sam2_segmentation.py`) dans le dossier des greffons de GIMP :
+1. Dans le dossier des greffons de GIMP, **créer un dossier nommé
+   `gimp_sam2_segmentation`** et y copier `gimp_sam2_segmentation.py` :
 
    | Système | Chemin |
    | --- | --- |
-   | Windows | `%APPDATA%\GIMP\<version>\plug-ins\` |
-   | Linux | `~/.config/GIMP/<version>/plug-ins/` |
-   | macOS | `~/Library/Application Support/GIMP/<version>/plug-ins/` |
+   | Windows | `%APPDATA%\GIMP\<version>\plug-ins\gimp_sam2_segmentation\` |
+   | Linux | `~/.config/GIMP/<version>/plug-ins/gimp_sam2_segmentation/` |
+   | macOS | `~/Library/Application Support/GIMP/<version>/plug-ins/gimp_sam2_segmentation/` |
 
    `<version>` est celle de votre GIMP : `3.0`, `3.2`...
 
-   Le nom du fichier doit rester identique au nom de son dossier. Sur macOS et
-   Linux, rendre le fichier exécutable (`chmod +x`).
+   **Le dossier doit porter exactement le nom du fichier, sans le `.py`** :
+   GIMP ne charge pas un greffon dont les deux noms diffèrent, et il ne le dit
+   pas. Sur macOS et Linux, rendre ensuite le fichier exécutable (`chmod +x`).
+
+   Dans ce dépôt, le fichier est à la racine : c'est à l'installation que le
+   dossier se crée.
 
 2. Redémarrer GIMP. Le filtre apparaît dans **Filtres > IA Suite > Segmentation
    Ciblée (SAM 2)...**

@@ -30,8 +30,7 @@ sys.path.insert(0, ICI)
 
 import faux_gimp
 
-CHEMIN_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation",
-                              "gimp_sam2_segmentation.py")
+CHEMIN_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation.py")
 
 RESULTATS = []
 
