@@ -9,6 +9,14 @@ ONNX manquants et se rabat sur une variante plus légère quand celle qu'il
 préférait n'est pas disponible. **Aucune étape ne demande de taper une commande
 ni de supprimer un dossier.**
 
+> **Document bilingue.** La version française ci-dessous fait référence ; elle
+> est complète et c'est elle qui est tenue à jour. Une version anglaise abrégée
+> se trouve en fin de document : [**English version**](#english-version).
+>
+> **Bilingual document.** The French text below is the reference version: it is
+> complete and kept up to date. A condensed English version is at the end of
+> this file: [**English version**](#english-version).
+
 ---
 
 ## Installation
@@ -353,3 +361,171 @@ d'installation — et non sur l'absence de message d'erreur.
 - Modèle : [SAM 2](https://github.com/facebookresearch/sam2) (Meta, Apache-2.0).
 - Exports ONNX : [samexporter](https://github.com/vietanhdev/samexporter) et le
   dépôt de poids associé (Apache-2.0).
+
+---
+
+# English version
+
+**This is a condensed translation.** The French text above is the reference: it
+is complete, and it is the one kept in sync with the code. Every numeric value
+quoted here also appears in [TABLE_DES_VALEURS.md](TABLE_DES_VALEURS.md), which
+is checked against the code automatically at delivery time. Where the two
+disagree, the French text and that table win.
+
+## What it does
+
+A GIMP 3 Python plug-in that separates one or more subjects from a layer using
+SAM 2 (ONNX encoder + decoder) and turns each of them into its own cut-out
+layer, optionally with a background layer underneath.
+
+The plug-in installs its own Python environment and downloads the missing ONNX
+weights by itself. **No step ever asks you to type a command or delete a
+folder.**
+
+## Installation
+
+In GIMP's plug-ins folder, **create a folder named `gimp_sam2_segmentation`**
+and copy `gimp_sam2_segmentation.py` into it:
+
+| System | Path |
+| --- | --- |
+| Windows | `%APPDATA%\GIMP\<version>\plug-ins\gimp_sam2_segmentation\` |
+| Linux | `~/.config/GIMP/<version>/plug-ins/gimp_sam2_segmentation/` |
+| macOS | `~/Library/Application Support/GIMP/<version>/plug-ins/gimp_sam2_segmentation/` |
+
+`<version>` is your GIMP's: `3.0`, `3.2`... **The folder must carry exactly the
+file name without `.py`** — GIMP silently refuses to load a plug-in whose file
+and folder names differ. On macOS and Linux, make the file executable
+(`chmod +x`).
+
+Restart GIMP. The filter appears under **Filters > IA Suite > Segmentation
+Ciblée (SAM 2)...** (the user interface is in French).
+
+If the filter does not appear, look for `journal_gimp_sam2_segment.log` in the
+shared folder. **Its absence is itself information**: it proves GIMP never
+executed the file, which points at the file name or the transfer rather than at
+the code.
+
+## First run
+
+Everything happens on its own, with an animated progress bar: a system Python is
+located (Windows registry, `py` launcher, standard install locations, then
+`PATH` as a last resort), a dedicated virtual environment is built, `numpy`,
+`onnxruntime` and `opencv-python-headless` are installed — the only three
+packages the worker actually imports — and the missing models are downloaded.
+Later runs skip straight to the segmentation: an environment marker avoids
+paying two to five seconds of import checks before any useful work.
+
+## Models
+
+Weights come from
+[`vietanhdev/segment-anything-2-onnx-models`](https://huggingface.co/vietanhdev/segment-anything-2-onnx-models)
+(exports of [samexporter](https://github.com/vietanhdev/samexporter), Apache-2.0).
+
+Downloads under the per-file threshold happen automatically but **never
+silently**: the real size reported by the server is displayed before the
+transfer starts. Above it, the plug-in refuses, falls back to a lighter variant
+and tells you the exact folder to drop the file into. On its own initiative it
+only ever fetches the light `tiny` variant; a heavier one is downloaded only if
+you pick it in the dialog.
+
+## Where files are written
+
+| Content | Location | Size |
+| --- | --- | --- |
+| Python environment, ONNX models | `%LOCALAPPDATA%\GIMP\ai_suite_shared\` (Linux: `~/.local/share/GIMP/ai_suite_shared/`, macOS: `~/Library/Application Support/GIMP/ai_suite_shared/`) | several hundred MB |
+| Marker, interpreter cache, hashes, log, incident archives, inventory | `<GIMP folder>\ai_suite_shared\` | a few KB |
+
+On Windows, paste `%LOCALAPPDATA%\GIMP\ai_suite_shared\models` into Explorer's
+address bar. That is **AppData\Local**, not the `AppData\Roaming` folder where
+the GIMP profile lives: a corporate roaming profile is synchronised at every
+logon, and a few gigabytes there become an operations incident.
+
+That folder deliberately carries **no GIMP version number**: the weights and the
+Python environment do not depend on it, and indexing them by version would mean
+re-downloading everything after each GIMP update. A versioned folder left by an
+earlier release of the plug-in is picked up by a plain rename.
+
+## Dialog options
+
+| Option (French label) | Default | Effect |
+| --- | --- | --- |
+| Mode d'extraction | Autonome | Keep every distinct element found, or apply the manual limit below. |
+| Nombre maximum d'éléments | 5 | Used only in manual-limit mode. |
+| Variante du modèle | Automatique | Force a variant instead of the adaptive choice. |
+| Ajouter un calque pour le fond | checked | Adds, below the elements, a layer holding everything that was not cut out. It is the exact complement of the elements: every pixel belongs to one layer and one only, with no hole and no overlap. |
+| Télécharger les modèles manquants | checked | When unchecked, the plug-in issues **no network request at all** and works with what is already on disk. |
+| Réinstaller l'environnement IA | unchecked | Rebuilds the Python environment. This is the intended way out of a broken environment — no file handling required. |
+
+With no selection the whole image is processed; with a selection, the crop is
+taken around it, margin included.
+
+## When it fails
+
+The working folder is destroyed after each run — but **on failure, logs and
+parameters are copied first** into a timestamped subfolder of
+`ai_suite_shared\logs\`, and the error message quotes that path. That folder is
+what to attach to a bug report. The last ten incidents are kept.
+
+Each failing exit of the worker carries a distinct marker (`[ERR_IMPORT]`,
+`[ERR_MODELE]`, `[ERR_MASQUE_VIDE]`...) and writes a `resultat.json` witness
+file. That file and the return code are what the plug-in decides on; searching
+the log for text only enriches the message.
+
+## What it does not guarantee
+
+- **No reference-hash verification.** Models go through trust-on-first-use: the
+  hash is recorded on first use and compared afterwards, with a warning only
+  (`tofu()`). TOFU detects a change, never malice, and blocks nothing.
+- **No hardware acceleration is installed.** The stack is CPU `onnxruntime`. If
+  an existing environment exposes a GPU provider, the worker intersects the
+  requested list with what is actually available and the layer name reports what
+  really ran — but the plug-in installs no GPU variant.
+- **Almost no measured timings.** Only environment installation (17.4 s) and its
+  marker-based reuse (< 0.01 s) were timed, on a Linux container outside GIMP.
+- **A future major GIMP release will need a plug-in update.** The GObject API
+  `3.0` is shared by GIMP 3.0, 3.2, 3.4...: the number tracks the API, not the
+  application, and those versions work unchanged. A GIMP 4 would bring API
+  `4.0`, which the plug-in then attempts — untested. On failure it writes
+  `journal_amorcage.log` instead of vanishing from the menus. Models and
+  environment are never lost: they do not depend on any GIMP version.
+- **Flatpak is not supported.** The sandbox makes every system Python
+  unreachable; the plug-in detects it and says so.
+- **Verification status, as of version 6.4.** Versions 6.1 to 6.3 were run by a
+  user on **Windows with GIMP 3.2**, `sam2_hiera_tiny` on CPU: environment
+  install, model download, three subjects cut out into three layers plus a
+  background layer. The 6.4 fixes (locations, API) have not yet been exercised
+  on a real machine. Everything else is covered by 148 automated checks outside
+  GIMP, including a full inference run against an `onnxruntime` test double.
+
+## Tests
+
+```bash
+python3 outils/tous_les_tests.py       # everything, with a summary and an exit code
+
+python3 outils/verifier_livraison.py   # 12 delivery checks + SHA-256 fingerprint
+python3 outils/tests_unitaires.py      # 86 checks, GIMP test double + local HTTP server
+python3 outils/tests_worker.py         # 50 checks, full inference against a double
+```
+
+The first two need nothing but Python 3; the third needs `numpy` and
+`opencv-python-headless`.
+
+They cover what breaks silently: prompt-point scaling, encoder input
+normalisation, the four channel cases, 16-bit depth, refusing an oversized
+download **without transferring a byte**, variant degradation, migrating an old
+virtual environment, log rotation, and the documentation matching the code's
+constants.
+
+Two production reports have their own regression test. Three subjects covering
+1.4 % of the image each, where the plug-in returned a single layer holding the
+sky (`test_sujets_dans_grand_ciel`); and two touching subjects of which only one
+came out (`test_sujets_se_touchant`). Both fail if the corresponding fix is
+reverted.
+
+## Credits
+
+- Model: [SAM 2](https://github.com/facebookresearch/sam2) (Meta, Apache-2.0).
+- ONNX exports: [samexporter](https://github.com/vietanhdev/samexporter) and its
+  companion weights repository (Apache-2.0).
+

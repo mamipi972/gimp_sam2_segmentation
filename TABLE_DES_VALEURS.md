@@ -5,7 +5,7 @@ C'est ce document qui rend un écart détectable au moment d'une relecture : la
 documentation ne doit jamais citer un seuil ou un délai qui ne figure pas ici.
 
 `outils/verifier_livraison.py` relit ce tableau et compare chaque valeur à celle
-réellement définie dans `gimp_sam2_segmentation/gimp_sam2_segmentation.py`. Un
+réellement définie dans `gimp_sam2_segmentation.py`. Un
 chiffre modifié d'un seul côté fait échouer le contrôle de livraison.
 
 **Mesuré ou déclaré.** Une valeur est *mesurée* quand elle provient d'une
