@@ -41,7 +41,7 @@ if os.name == "nt":
 #    Toute valeur citee dans la documentation vient d'ici (voir
 #    TABLE_DES_VALEURS.md).
 # ==============================================================================
-PLUGIN_VERSION = "6.1"
+PLUGIN_VERSION = "6.2"
 PLUGIN_ID = "gimp_sam2_segment"
 PROCEDURE_NAME = "plug-in-sam2-segment"
 SHARED_DIR_NAME = "ai_suite_shared"
@@ -103,7 +103,11 @@ DELAI_WORKER_S = 900
 # Reglages de segmentation, tous cites dans la table des valeurs.
 MARGE_ROI_RATIO = 0.20
 MARGE_ROI_MIN_PX = 32
-SCORE_MIN = 0.85
+# Score en dessous duquel un masque est ecarte. Abaisse de 0,85 a 0,60 en
+# v6.2 : un sujet partiellement recouvert par un autre fait chuter la
+# confiance du modele, et un element manquant est invisible alors qu'un calque
+# superflu se supprime d'un clic. Le score figure dans le nom du calque.
+SCORE_MIN = 0.60
 NMS_RECOUVREMENT_MAX = 0.60
 AIRE_MIN_MASQUE_RATIO = 0.002
 AIRE_MIN_CONTOUR_RATIO = 0.0005
@@ -113,8 +117,12 @@ AIRE_MAX_MASQUE_RATIO = 0.60
 BORDS_TOUCHES_FOND = 3
 # Points d'amorce : interieur des contours trouves, complete par une grille
 # reguliere pour les sujets que la detection de contours manque.
-POINTS_GRILLE = 3
-POINTS_MAX = 24
+POINTS_GRILLE = 4
+POINTS_MAX = 32
+# Seconde passe : on sonde ce qui reste de la matiere detectee et qu'aucun
+# masque ne couvre. C'est ce qui rattrape un sujet colle a un autre, dont le
+# contour ferme n'en forme qu'un.
+POINTS_RESIDUELS = 6
 TAILLE_ENTREE_ENCODEUR = 1024
 
 # Archivage des journaux et mode de mise au point.
@@ -1812,26 +1820,35 @@ def preparer_entree_encodeur(crop_bgr, taille, np):
     return x[np.newaxis, ...].astype(np.float32)
 
 
-def points_candidats(crop_bgr, cfg, np):
-    """Points d'amorce a soumettre au decodeur.
+def points_interieurs(plein, np, maximum, rayon_min=3.0):
+    """Un point par renflement de la matiere, et non un par contour.
 
-    Le centre de gravite d'un contour tombe souvent a cote du sujet - entre
-    deux ailes, par exemple - et SAM 2 segmente alors le fond sans se plaindre.
-    On remplit donc chaque contour et on prend son point le plus interieur
-    (transformee de distance), ce qui garantit un point pose sur le sujet.
-
-    Une grille reguliere complete la liste : la detection de contours manque
-    les sujets peu contrastes, et un point de grille tombe tot ou tard sur
-    chacun d'eux. Les masques de fond que produisent les points du ciel sont
-    ecartes plus loin.
+    Deux sujets qui se touchent ne forment qu'un contour ferme : un seul point
+    interieur, donc un seul sujet detoure. On prend donc les pics successifs de
+    la transformee de distance, en effacant autour de chaque pic un disque de
+    son propre rayon : le renflement voisin survit et fournit son point.
     """
     import cv2
 
-    hauteur, largeur = crop_bgr.shape[:2]
-    ratio_aire_min = float(cfg.get("aire_min_contour_ratio", 0.0005))
-    aire_min = float(hauteur * largeur) * ratio_aire_min
+    distance = cv2.distanceTransform(plein, cv2.DIST_L2, 3)
+    travail = distance.copy()
     points = []
+    for _ in range(max(0, int(maximum))):
+        _, maxi, _, position = cv2.minMaxLoc(travail)
+        if maxi < rayon_min:
+            break
+        x, y = int(position[0]), int(position[1])
+        points.append((x, y))
+        cv2.circle(travail, (x, y), int(max(rayon_min, maxi)), 0, -1)
+    return points
 
+
+def matiere_detectee(crop_bgr, cfg, np):
+    """Masque des formes fermees assez grandes pour etre un sujet."""
+    import cv2
+
+    hauteur, largeur = crop_bgr.shape[:2]
+    aire_min = float(hauteur * largeur) * float(cfg.get("aire_min_contour_ratio", 0.0005))
     gris = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     flou = cv2.GaussianBlur(gris, (5, 5), 0)
     bords = cv2.Canny(flou, 50, 150)
@@ -1840,23 +1857,33 @@ def points_candidats(crop_bgr, cfg, np):
     noyau = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     fermes = cv2.morphologyEx(bords, cv2.MORPH_CLOSE, noyau, iterations=2)
     trouves, _ = cv2.findContours(fermes, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    mesures = []
+    plein = np.zeros((hauteur, largeur), dtype=np.uint8)
     for contour in trouves:
-        aire = cv2.contourArea(contour)
-        if aire > aire_min:
-            mesures.append((aire, contour))
-    mesures.sort(key=lambda t: t[0], reverse=True)
+        if cv2.contourArea(contour) > aire_min:
+            cv2.drawContours(plein, [contour], -1, 255, -1)
+    return plein
 
-    for aire, contour in mesures[:int(cfg.get("points_max", 24))]:
-        plein = np.zeros((hauteur, largeur), dtype=np.uint8)
-        cv2.drawContours(plein, [contour], -1, 255, -1)
-        distance = cv2.distanceTransform(plein, cv2.DIST_L2, 3)
-        _, maxi, _, position = cv2.minMaxLoc(distance)
-        if maxi > 0:
-            points.append((int(position[0]), int(position[1])))
 
-    grille = max(1, int(cfg.get("points_grille", 3)))
+def points_candidats(crop_bgr, cfg, np):
+    """Retourne (points d'amorce, masque de la matiere detectee).
+
+    Le centre de gravite d'un contour tombe souvent a cote du sujet - entre
+    deux ailes, par exemple - et SAM 2 segmente alors le fond sans se plaindre.
+    On travaille donc sur la matiere remplie, et on y prend des points
+    franchement interieurs.
+
+    Une grille reguliere complete la liste : la detection de contours manque
+    les sujets peu contrastes, et un point de grille tombe tot ou tard sur
+    chacun d'eux. Les masques de fond que produisent les points du ciel sont
+    ecartes plus loin.
+    """
+    hauteur, largeur = crop_bgr.shape[:2]
+    plafond = int(cfg.get("points_max", 32))
+    plein = matiere_detectee(crop_bgr, cfg, np)
+
+    points = points_interieurs(plein, np, plafond)
+
+    grille = max(1, int(cfg.get("points_grille", 4)))
     for iy in range(grille):
         for ix in range(grille):
             points.append((int(largeur * (ix + 0.5) / grille),
@@ -1873,9 +1900,9 @@ def points_candidats(crop_bgr, cfg, np):
         if any(((x - px) ** 2 + (y - py) ** 2) ** 0.5 < minimum for px, py in retenus):
             continue
         retenus.append((x, y))
-        if len(retenus) >= int(cfg.get("points_max", 24)):
+        if len(retenus) >= plafond:
             break
-    return retenus
+    return retenus, plein
 
 
 def est_masque_de_fond(masque, cfg, np):
@@ -2043,7 +2070,7 @@ def run():
             sorties = decodeur.run(None, alimentation)
             return dict(zip(noms_sortie_dec, sorties))
 
-        candidats = points_candidats(crop, cfg, np)
+        candidats, matiere = points_candidats(crop, cfg, np)
         aire_min = float(crop_h * crop_w) * float(cfg.get("aire_min_masque_ratio", 0.002))
 
         def masque_depuis_logits(logits):
@@ -2051,21 +2078,13 @@ def run():
                                interpolation=cv2.INTER_LINEAR)
             return np.where(redim > 0.0, 255, 0).astype(np.uint8)
 
-        bruts = []
-        fonds = []
-        for point in candidats:
-            try:
-                sortie = executer_decodeur(point)
-            except MemoryError as e:
-                sortir(dossier, "erreur_memoire", "[ERR_MEMOIRE]", CODE_MEMOIRE,
-                       "memoire insuffisante pendant le decodage: " + str(e))
-                return
-            except Exception as e:
-                sortir(dossier, "erreur_inference", "[ERR_INFERENCE]", CODE_INFERENCE,
-                       "echec du decodeur: " + str(e) + " | " +
-                       traceback.format_exc()[-600:])
-                return
+        def evaluer_point(point):
+            """Retourne (element, masque_de_fond) pour un point d'amorce.
 
+            SAM 2 propose plusieurs masques par point : on retient le meilleur
+            qui ne soit pas le fond, au lieu du meilleur tout court.
+            """
+            sortie = executer_decodeur(point)
             masques = sortie.get("masks")
             if masques is None:
                 masques = list(sortie.values())[0]
@@ -2085,9 +2104,6 @@ def run():
                     ((float(scores[i]), i) for i in range(min(nombre, scores.size))),
                     reverse=True)
 
-            # SAM 2 propose plusieurs masques par point : on retient le
-            # meilleur qui ne soit pas le fond, au lieu du meilleur tout court.
-            garde = None
             meilleur_fond = None
             for score, indice in classement:
                 binaire = masque_depuis_logits(masques[0, indice])
@@ -2098,14 +2114,65 @@ def run():
                     if meilleur_fond is None:
                         meilleur_fond = entree
                     continue
-                garde = entree
-                break
-            if garde is not None:
-                bruts.append(garde)
-            elif meilleur_fond is not None:
-                fonds.append(meilleur_fond)
+                return entree, None
+            return None, meilleur_fond
 
-        seuil = float(cfg.get("score_min", 0.85))
+        bruts = []
+        fonds = []
+        couvert = np.zeros((crop_h, crop_w), dtype=np.uint8)
+        ignores = 0
+        for point in list(candidats):
+            # Un point deja couvert par un masque accepte redonnerait le meme
+            # masque : autant d'inutile a payer, et chaque decodage se paie.
+            if couvert[int(point[1]), int(point[0])] > 0:
+                ignores += 1
+                continue
+            try:
+                element, fond = evaluer_point(point)
+            except MemoryError as e:
+                sortir(dossier, "erreur_memoire", "[ERR_MEMOIRE]", CODE_MEMOIRE,
+                       "memoire insuffisante pendant le decodage: " + str(e))
+                return
+            except Exception as e:
+                sortir(dossier, "erreur_inference", "[ERR_INFERENCE]", CODE_INFERENCE,
+                       "echec du decodeur: " + str(e) + " | " +
+                       traceback.format_exc()[-600:])
+                return
+            if element is not None:
+                bruts.append(element)
+                couvert = np.maximum(couvert, element["masque"])
+            elif fond is not None:
+                fonds.append(fond)
+
+        # Seconde passe : la matiere detectee qu'aucun masque ne couvre. C'est
+        # ce qui rattrape un sujet colle a un autre, dont le contour ferme n'en
+        # formait qu'un seul.
+        points_residuels = []
+        if bruts and np.count_nonzero(matiere):
+            reste = np.where(np.logical_and(matiere > 0, couvert == 0), 255, 0).astype(np.uint8)
+            plafond_residuel = int(cfg.get("points_residuels", 6))
+            for aire, morceau in composantes_connexes(reste, aire_min, np)[:plafond_residuel]:
+                trouves = points_interieurs(morceau, np, 1)
+                if not trouves:
+                    continue
+                point = trouves[0]
+                points_residuels.append(list(point))
+                try:
+                    element, fond = evaluer_point(point)
+                except Exception as e:
+                    # La seconde passe est un supplement : son echec n'annule
+                    # pas les elements deja trouves. Pas de marqueur ici, ce
+                    # n'est pas un chemin de sortie.
+                    print("seconde passe interrompue: " + str(e))
+                    sys.stdout.flush()
+                    break
+                if element is not None:
+                    bruts.append(element)
+                    couvert = np.maximum(couvert, element["masque"])
+                elif fond is not None:
+                    fonds.append(fond)
+
+        seuil = float(cfg.get("score_min", 0.60))
         recouvrement_max = float(cfg.get("nms_recouvrement_max", 0.60))
         seuil_abaisse = False
         fond_inverse = False
@@ -2218,6 +2285,9 @@ def run():
                 "fournisseurs_disponibles": disponibles,
                 "seuil_score_abaisse": seuil_abaisse,
                 "points_essayes": len(candidats),
+                "points_ignores_deja_couverts": ignores,
+                "points_seconde_passe": points_residuels,
+                "masques_bruts": len(bruts),
                 "masques_de_fond_rejetes": len(fonds),
                 "masque_de_fond_inverse": fond_inverse,
                 "profondeur_source": str(profondeur),
@@ -2442,6 +2512,7 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
                 "bords_touches_fond": BORDS_TOUCHES_FOND,
                 "points_grille": POINTS_GRILLE,
                 "points_max": POINTS_MAX,
+                "points_residuels": POINTS_RESIDUELS,
                 "taille_entree": TAILLE_ENTREE_ENCODEUR,
                 "fournisseurs": ["CUDAExecutionProvider", "ROCMExecutionProvider",
                                  "DmlExecutionProvider", "CoreMLExecutionProvider",

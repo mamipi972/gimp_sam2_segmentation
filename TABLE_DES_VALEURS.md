@@ -20,7 +20,7 @@ valeurs mesurées, et ils disent où.
 
 | Constante | Valeur | Nature | Rôle |
 | --- | --- | --- | --- |
-| `PLUGIN_VERSION` | 6.1 | déclarée | Version du greffon, consignée dans le marqueur d'environnement. Elle vit dans le code, jamais dans le nom du fichier. |
+| `PLUGIN_VERSION` | 6.2 | déclarée | Version du greffon, consignée dans le marqueur d'environnement. Elle vit dans le code, jamais dans le nom du fichier. |
 | `STACK_NAME` | onnx-cpu | déclarée | Nom de la pile technique. Il suffixe le venv, le marqueur et le cache d'interpréteur pour qu'un autre greffon de la suite ne réinstalle jamais par-dessus. |
 | `VENV_DIR_NAME` | venv-onnx-cpu | déclarée | Environnement virtuel dédié, sous le dossier de données volumineuses. |
 | `MARKER_FILE_NAME` | env_onnx-cpu.json | déclarée | Marqueur d'environnement, sous `Gimp.directory()`. |
@@ -83,14 +83,15 @@ est celle que renvoie le serveur.
 | `TAILLE_ENTREE_ENCODEUR` | 1024 | déclarée | Côté de l'entrée de l'encodeur SAM 2. Valeur par défaut : la forme réelle déclarée par le modèle chargé la remplace. |
 | `MARGE_ROI_RATIO` | 0.2 | déclarée | Marge ajoutée autour de la sélection avant recadrage, en proportion du plus grand côté. |
 | `MARGE_ROI_MIN_PX` | 32 | déclarée | Marge minimale en pixels, quelle que soit la taille de la sélection. |
-| `SCORE_MIN` | 0.85 | déclarée | Score de confiance en dessous duquel un masque est écarté. Si aucun masque ne l'atteint, **le meilleur masque obtenu est conservé** et l'utilisateur en est informé : l'utilisateur voulait détourer une image, pas arbitrer un score. |
+| `SCORE_MIN` | 0.6 | déclarée | Score de confiance en dessous duquel un masque est écarté. Abaissé de 0,85 en v6.2 : un sujet partiellement recouvert par un autre fait chuter la confiance du modèle, et un élément manquant est invisible alors qu'un calque superflu se supprime d'un clic. Le score figure dans le nom du calque. Si aucun masque n'atteint le seuil, **le meilleur obtenu est conservé** et l'utilisateur en est informé. |
 | `NMS_RECOUVREMENT_MAX` | 0.6 | déclarée | Recouvrement au-delà duquel deux masques sont considérés comme le même élément. |
 | `AIRE_MIN_MASQUE_RATIO` | 0.002 | déclarée | Aire minimale d'un masque retenu, en proportion de la zone recadrée. Abaissée de 0,02 en v6.1 : un oiseau dans un grand ciel fait moins de 2 % de l'image et se faisait écarter. |
 | `AIRE_MIN_CONTOUR_RATIO` | 0.0005 | déclarée | Aire minimale d'un contour pour fournir un point d'amorce. Abaissée de 0,03 en v6.1, pour la même raison : à 3 %, un contour devait mesurer 175 x 175 px sur une image 1280 x 800, et aucun sujet ne qualifiait. |
 | `AIRE_MAX_MASQUE_RATIO` | 0.6 | déclarée | Au-delà de cette part du recadrage, le masque décrit le fond et non un élément. Un tel masque est écarté même avec un score excellent : il est correct, c'est simplement le complément de ce que l'utilisateur voulait. |
 | `BORDS_TOUCHES_FOND` | 3 | déclarée | Nombre de bords du recadrage longés (sur plus de la moitié de leur longueur) à partir duquel un masque couvrant plus de 30 % est considéré comme le fond. |
-| `POINTS_GRILLE` | 3 | déclarée | Côté de la grille de points d'amorce ajoutée aux points issus des contours (3 x 3 = 9 points), pour les sujets que la détection de contours manque. |
-| `POINTS_MAX` | 24 | déclarée | Nombre maximal de points d'amorce soumis au décodeur. Chaque point coûte un décodage ; l'encodage, lui, n'a lieu qu'une fois. |
+| `POINTS_GRILLE` | 4 | déclarée | Côté de la grille de points d'amorce ajoutée aux points issus des contours (4 x 4 = 16 points), pour les sujets que la détection de contours manque. |
+| `POINTS_MAX` | 32 | déclarée | Nombre maximal de points d'amorce soumis au décodeur. Chaque point coûte un décodage ; l'encodage, lui, n'a lieu qu'une fois. |
+| `POINTS_RESIDUELS` | 6 | déclarée | Nombre maximal de sondages d'une seconde passe, portant sur la matière détectée qu'aucun masque ne couvre. C'est ce qui rattrape un sujet collé à un autre, dont le contour fermé n'en forme qu'un seul. |
 | `DELAI_WORKER_S` | 900 | déclarée | Délai maximal d'une segmentation. Au-delà, le groupe de processus est tué et les journaux archivés. |
 
 ## Repères de durée

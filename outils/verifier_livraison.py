@@ -17,7 +17,8 @@ Verifie, sur le fichier livre :
      sans interpolation, la liste est dupliquee et derive silencieusement ;
   6. fidelite de TABLE_DES_VALEURS.md : chaque constante citee par la
      documentation est comparee a la valeur reellement definie dans le code ;
-  7. somme de controle SHA-256, a publier a cote du fichier : c'est le seul
+  7. coherence des cles de configuration entre le greffon et son worker ;
+  8. somme de controle SHA-256, a publier a cote du fichier : c'est le seul
      moyen pour un utilisateur de distinguer un greffon defectueux d'un fichier
      altere pendant le transport.
 
@@ -199,10 +200,21 @@ def main():
     verifier(not inconnus,
              "aucun marqueur inconnu cote greffon (%s)" % (sorted(inconnus) or "aucun"))
 
-    # 6. Fidelite de la documentation.
+    # 6. Cles de configuration : tout ce que le worker lit doit etre ecrit.
+    lues = set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', worker or ""))
+    lues |= set(re.findall(r'cfg\[\s*"([a-z_]+)"\s*\]', worker or ""))
+    hors = source.replace(worker or "", "")
+    ecrites = set(re.findall(r'^\s+"([a-z_]+)":', hors, re.MULTILINE))
+    oubliees = lues - ecrites
+    verifier(not oubliees,
+             "chaque parametre lu par le worker est ecrit par le greffon "
+             "(sinon il retombe en silence sur une valeur par defaut) : %s"
+             % (sorted(oubliees) or "aucun oubli"))
+
+    # 7. Fidelite de la documentation.
     verifier_table_des_valeurs()
 
-    # 7. Somme de controle.
+    # 8. Somme de controle.
     empreinte = hashlib.sha256(brut).hexdigest()
 
     print("Controles de livraison : " + FICHIER_GREFFON)

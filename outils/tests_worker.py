@@ -25,10 +25,12 @@ temoin, code de retour - jamais sur la presence d'un texte dans la sortie.
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import numpy as np
 import cv2
@@ -48,6 +50,7 @@ import numpy as np
 RAYON = __RAYON__
 FORMES = json.loads(os.environ.get("TEST_FORMES", "[]"))
 TOUT_FOND = os.environ.get("TEST_TOUT_FOND") == "1"
+SCORE_SUJET = float(os.environ.get("TEST_SCORE_SUJET", "0.95"))
 
 
 class _Info:
@@ -142,7 +145,8 @@ class InferenceSession:
             forme = _ellipse(*touche)
             masques = np.stack([_logits(forme), _logits(_ellipse(*touche, marge=1.3)),
                                 _logits(_ellipse(*touche, marge=0.4))])[np.newaxis, ...]
-            return [masques, np.array([[0.95, 0.60, 0.35]], dtype=np.float32)]
+            return [masques, np.array([[SCORE_SUJET, SCORE_SUJET * 0.6,
+                                        SCORE_SUJET * 0.35]], dtype=np.float32)]
 
         fond = ~_union_formes()
         fond_large = ~_union_formes(marge=2.0)
@@ -152,6 +156,24 @@ class InferenceSession:
 """
 
 FAUX_ONNXRUNTIME = MODELE_FAUX_ORT.replace("__RAYON__", repr(RAYON_DISQUE_1024))
+
+
+def cles_attendues_par_le_worker():
+    """Cles de configuration que le worker lit reellement.
+
+    Une cle absente du dictionnaire de test fait retomber le worker sur sa
+    valeur par defaut : le test s'execute alors avec d'autres reglages que ceux
+    livres, et ne prouve plus rien. C'est arrive, d'ou ce controle.
+    """
+    return set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', extraire_worker()))
+
+
+def verifier_couverture_des_cles(parametres):
+    manquantes = cles_attendues_par_le_worker() - set(parametres)
+    # 'image' et 'dossier_sortie' sont lus autrement, les autres doivent y etre.
+    if manquantes:
+        raise SystemExit("cles absentes du dictionnaire de test : %s"
+                         % ", ".join(sorted(manquantes)))
 
 
 def constantes_greffon():
@@ -257,10 +279,12 @@ class Bac:
             "bords_touches_fond": constante("BORDS_TOUCHES_FOND"),
             "points_grille": constante("POINTS_GRILLE"),
             "points_max": constante("POINTS_MAX"),
+            "points_residuels": constante("POINTS_RESIDUELS"),
             "taille_entree": constante("TAILLE_ENTREE_ENCODEUR"),
             "fournisseurs": ["CUDAExecutionProvider", "CPUExecutionProvider"],
         }
         base.update(extra)
+        verifier_couverture_des_cles(base)
         return base
 
     def nettoyer(self):
@@ -558,6 +582,85 @@ def test_repli_inversion_du_fond():
         bac.nettoyer()
 
 
+def test_sujets_se_touchant():
+    print("Cas 7 : deux sujets colles, un troisieme a l'ecart (cas signale)")
+    largeur, hauteur = 1280, 800
+    # Les deux premiers se chevauchent : leurs contours fermes n'en forment
+    # qu'un, et la v6.1 n'en detourait donc qu'un seul.
+    sujets = [(300, 560, 100, 45), (430, 590, 100, 45), (620, 250, 100, 45)]
+    formes_1024 = [[cx * 1024.0 / largeur, cy * 1024.0 / hauteur,
+                    rx * 1024.0 / largeur, ry * 1024.0 / hauteur]
+                   for cx, cy, rx, ry in sujets]
+
+    bac = Bac(scenario={"TEST_FORMES": json.dumps(formes_1024)})
+    try:
+        image = image_sujets_dans_grand_ciel(largeur, hauteur, sujets)
+        chemin = os.path.join(bac.dossier, "colles.png")
+        cv2.imwrite(chemin, image)
+        debut = time.time()
+        sortie = bac.executer(bac.parametres(chemin,
+                                             roi=[False, 0, 0, largeur, hauteur]))
+        duree = time.time() - debut
+        resultat = sortie["resultat"]
+        controler("statut succes", resultat.get("statut") == "succes",
+                  str(resultat)[:300])
+        controler("les trois sujets sont detoures, y compris les deux colles",
+                  len(sortie["sorties"]) == 3,
+                  "%d element(s), points essayes %s, seconde passe %s"
+                  % (len(sortie["sorties"]), resultat.get("points_essayes"),
+                     resultat.get("points_seconde_passe")))
+        centres = []
+        for nom in sortie["sorties"]:
+            rgba = cv2.imread(os.path.join(bac.dossier, nom), cv2.IMREAD_UNCHANGED)
+            cm = centre_de_masse(rgba[:, :, 3])
+            if cm:
+                centres.append(cm)
+        distances = []
+        for cx, cy, _, _ in sujets:
+            if centres:
+                distances.append(min(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                                     for x, y in centres))
+        controler("chaque sujet a son calque, aux bonnes coordonnees",
+                  len(distances) == 3 and all(d < 40 for d in distances),
+                  "distances = %s" % [round(d, 1) for d in distances])
+        print("       (%d points d'amorce, %.1f s pour l'ensemble du worker)"
+              % (resultat.get("points_essayes") or 0, duree))
+    finally:
+        bac.nettoyer()
+
+
+def test_plancher_de_score():
+    print("Cas 8 : un sujet peu contraste reste retenu")
+    largeur, hauteur = 1280, 800
+    sujets = [(320, 250, 100, 45), (620, 600, 100, 45)]
+    formes_1024 = [[cx * 1024.0 / largeur, cy * 1024.0 / hauteur,
+                    rx * 1024.0 / largeur, ry * 1024.0 / hauteur]
+                   for cx, cy, rx, ry in sujets]
+    # 0,75 : au-dessus du plancher de la v6.2, sous celui de la v6.1. Un sujet
+    # partiellement recouvert par un autre fait chuter la confiance du modele.
+    bac = Bac(scenario={"TEST_FORMES": json.dumps(formes_1024),
+                        "TEST_SCORE_SUJET": "0.75"})
+    try:
+        image = image_sujets_dans_grand_ciel(largeur, hauteur, sujets)
+        chemin = os.path.join(bac.dossier, "peu_contraste.png")
+        cv2.imwrite(chemin, image)
+        sortie = bac.executer(bac.parametres(chemin,
+                                             roi=[False, 0, 0, largeur, hauteur]))
+        resultat = sortie["resultat"]
+        controler("un score de 0,75 ne fait plus perdre le sujet",
+                  len(sortie["sorties"]) == 2,
+                  "%d element(s)" % len(sortie["sorties"]))
+        controler("le seuil n'a pas eu besoin d'etre abaisse en catastrophe",
+                  resultat.get("seuil_score_abaisse") is False,
+                  str(resultat.get("seuil_score_abaisse")))
+        controler("le score constate est remonte au greffon",
+                  resultat.get("elements")
+                  and abs(float(resultat["elements"][0]["score"]) - 0.75) < 0.01,
+                  str(resultat.get("elements"))[:200])
+    finally:
+        bac.nettoyer()
+
+
 def main():
     print("Tests du worker SAM 2 (double d'onnxruntime, aucun modele reel)")
     print("")
@@ -565,6 +668,8 @@ def main():
     test_gris_et_alpha()
     test_16_bits()
     test_sujets_dans_grand_ciel()
+    test_sujets_se_touchant()
+    test_plancher_de_score()
     test_repli_inversion_du_fond()
     test_sorties_en_echec()
     print("")

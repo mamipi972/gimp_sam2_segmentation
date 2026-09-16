@@ -112,23 +112,29 @@ SAM 2 ne devine pas ce qui vous intéresse : il segmente ce que désigne un
 « point d'amorce ». Le greffon en fabrique donc plusieurs, et trie les
 résultats.
 
-1. **Points issus des contours.** Les contours détectés sont refermés puis
-   remplis, et le point retenu est le plus intérieur de chaque forme
-   (transformée de distance). C'est le détail qui compte : le centre de gravité
-   d'un contour tombe souvent à côté du sujet — entre deux ailes, par exemple —
-   et SAM 2 segmente alors le ciel sans se plaindre.
-2. **Grille régulière** de 3 x 3 points, pour les sujets que la détection de
-   contours manque. Au total, 24 points au maximum ; chacun coûte un décodage,
-   l'encodage n'ayant lieu qu'une fois.
+1. **Points intérieurs à la matière détectée.** Les contours sont refermés puis
+   remplis, et les points retenus sont les pics successifs de la transformée de
+   distance — un par renflement, pas un par contour. Deux détails comptent : le
+   centre de gravité d'un contour tombe souvent à côté du sujet (entre deux
+   ailes, par exemple) et SAM 2 segmente alors le ciel sans se plaindre ; et
+   deux sujets qui se touchent ne forment qu'un seul contour fermé, donc un
+   seul point si l'on n'en prend qu'un.
+2. **Grille régulière** de 4 x 4 points, pour les sujets que la détection de
+   contours manque. Au total, 32 points au maximum ; chacun coûte un décodage,
+   l'encodage n'ayant lieu qu'une fois. Un point déjà couvert par un masque
+   accepté est sauté : il redonnerait le même masque.
 3. **Rejet des masques de fond.** Un masque qui couvre plus de 60 % du
    recadrage, ou qui longe au moins trois bords, décrit le fond et non un
    élément. Il est écarté *même avec un score excellent* : il est correct, c'est
    simplement le complément de ce que vous voulez. Pour chaque point, SAM 2
    propose plusieurs masques ; le greffon retient le meilleur qui ne soit pas
    le fond, au lieu du meilleur tout court.
-4. **Dédoublonnage** : deux masques qui se recouvrent à plus de 60 % sont le
+4. **Seconde passe** sur la matière détectée qu'aucun masque ne couvre, dans la
+   limite de 6 sondages. C'est le filet de sécurité pour un sujet collé à un
+   autre.
+5. **Dédoublonnage** : deux masques qui se recouvrent à plus de 60 % sont le
    même élément.
-5. **Repli** : si tous les masques obtenus sont des fonds, le greffon inverse le
+6. **Repli** : si tous les masques obtenus sont des fonds, le greffon inverse le
    meilleur d'entre eux et découpe ce complément en taches disjointes — un
    calque par sujet. Vous obtenez un résultat, avec la mention du procédé, au
    lieu d'un message d'erreur.
@@ -219,7 +225,7 @@ reconstruit et relance une fois, sans rien demander.
   téléchargement et de segmentation restent des cases vides dans la table des
   valeurs, et le resteront tant qu'une exécution réelle ne les aura pas
   remplies.
-- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 108
+- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 114
   contrôles automatiques hors de GIMP (voir ci-dessous), dont une inférence
   complète contre un double d'`onnxruntime`. Les chemins qui touchent l'API GIMP
   elle-même — export du calque désigné, insertion des calques, fenêtre d'options
@@ -238,9 +244,9 @@ reconstruit et relance une fois, sans rien demander.
 ```bash
 python3 outils/tous_les_tests.py       # tout, avec un résumé et un code de retour
 
-python3 outils/verifier_livraison.py   # 12 contrôles de livraison + empreinte SHA-256
+python3 outils/verifier_livraison.py   # 13 contrôles de livraison + empreinte SHA-256
 python3 outils/tests_unitaires.py      # 72 contrôles, doublure GIMP + serveur HTTP local
-python3 outils/tests_worker.py         # 36 contrôles, inférence complète contre un double
+python3 outils/tests_worker.py         # 42 contrôles, inférence complète contre un double
 ```
 
 `tests_unitaires.py` et `verifier_livraison.py` n'ont besoin de rien d'autre que
@@ -253,10 +259,16 @@ normalisation de l'entrée de l'encodeur, les quatre cas de canaux, la profondeu
 octet**, la dégradation de variante, la migration d'un ancien venv, la purge des
 archives, et la fidélité de la documentation aux constantes du code.
 
-Le cas signalé en production — trois sujets de 1,4 % de l'image dans un grand
-ciel, dont le greffon ne sortait qu'un seul calque contenant le fond — a sa
-propre régression (`test_sujets_dans_grand_ciel`). Elle échoue si l'on remet les
-seuils de la v6.0 : un calque, couvrant 96 % de l'image.
+Les deux cas signalés en production ont chacun leur régression. Trois sujets de
+1,4 % de l'image dans un grand ciel, dont le greffon ne sortait qu'un calque
+contenant le fond (`test_sujets_dans_grand_ciel`) : avec les seuils de la v6.0,
+il rend un calque couvrant 96 % de l'image. Deux sujets collés dont un seul
+ressortait (`test_sujets_se_touchant`) : dans l'état de la v6.1, il n'en rend
+qu'un sur trois.
+
+Les tests lisent les constantes du greffon plutôt que de les recopier, et
+refusent de démarrer s'il manque un paramètre au dictionnaire de configuration —
+une valeur périmée dans un test l'a déjà rendu incapable de voir un défaut.
 
 ### Tester depuis un état vierge
 
