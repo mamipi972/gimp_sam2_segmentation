@@ -41,7 +41,7 @@ if os.name == "nt":
 #    Toute valeur citee dans la documentation vient d'ici (voir
 #    TABLE_DES_VALEURS.md).
 # ==============================================================================
-PLUGIN_VERSION = "6.0"
+PLUGIN_VERSION = "6.1"
 PLUGIN_ID = "gimp_sam2_segment"
 PROCEDURE_NAME = "plug-in-sam2-segment"
 SHARED_DIR_NAME = "ai_suite_shared"
@@ -105,8 +105,16 @@ MARGE_ROI_RATIO = 0.20
 MARGE_ROI_MIN_PX = 32
 SCORE_MIN = 0.85
 NMS_RECOUVREMENT_MAX = 0.60
-AIRE_MIN_MASQUE_RATIO = 0.02
-AIRE_MIN_CONTOUR_RATIO = 0.03
+AIRE_MIN_MASQUE_RATIO = 0.002
+AIRE_MIN_CONTOUR_RATIO = 0.0005
+# Un masque qui couvre presque tout le recadrage, ou qui longe au moins trois
+# bords, est le fond de l'image et non un element a detourer.
+AIRE_MAX_MASQUE_RATIO = 0.60
+BORDS_TOUCHES_FOND = 3
+# Points d'amorce : interieur des contours trouves, complete par une grille
+# reguliere pour les sujets que la detection de contours manque.
+POINTS_GRILLE = 3
+POINTS_MAX = 24
 TAILLE_ENTREE_ENCODEUR = 1024
 
 # Archivage des journaux et mode de mise au point.
@@ -1804,33 +1812,113 @@ def preparer_entree_encodeur(crop_bgr, taille, np):
     return x[np.newaxis, ...].astype(np.float32)
 
 
-def points_candidats(crop_bgr, ratio_aire_min, np):
-    """Points d'amorce : centres des contours significatifs, plus le centre du
-    recadrage en repli."""
+def points_candidats(crop_bgr, cfg, np):
+    """Points d'amorce a soumettre au decodeur.
+
+    Le centre de gravite d'un contour tombe souvent a cote du sujet - entre
+    deux ailes, par exemple - et SAM 2 segmente alors le fond sans se plaindre.
+    On remplit donc chaque contour et on prend son point le plus interieur
+    (transformee de distance), ce qui garantit un point pose sur le sujet.
+
+    Une grille reguliere complete la liste : la detection de contours manque
+    les sujets peu contrastes, et un point de grille tombe tot ou tard sur
+    chacun d'eux. Les masques de fond que produisent les points du ciel sont
+    ecartes plus loin.
+    """
     import cv2
+
+    hauteur, largeur = crop_bgr.shape[:2]
+    ratio_aire_min = float(cfg.get("aire_min_contour_ratio", 0.0005))
+    aire_min = float(hauteur * largeur) * ratio_aire_min
+    points = []
 
     gris = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     flou = cv2.GaussianBlur(gris, (5, 5), 0)
-    contours_image = cv2.Canny(flou, 50, 150)
-    trouves, _ = cv2.findContours(contours_image, cv2.RETR_EXTERNAL,
-                                  cv2.CHAIN_APPROX_SIMPLE)
-    hauteur, largeur = crop_bgr.shape[:2]
-    aire_min = float(hauteur * largeur) * ratio_aire_min
-    points = []
+    bords = cv2.Canny(flou, 50, 150)
+    # Fermer les contours interrompus, sans quoi un remplissage fuit dans le
+    # fond et le point interieur n'est plus interieur.
+    noyau = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    fermes = cv2.morphologyEx(bords, cv2.MORPH_CLOSE, noyau, iterations=2)
+    trouves, _ = cv2.findContours(fermes, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    mesures = []
     for contour in trouves:
-        if cv2.contourArea(contour) <= aire_min:
-            continue
-        moments = cv2.moments(contour)
-        if moments["m00"] == 0:
-            continue
-        points.append((int(moments["m10"] / moments["m00"]),
-                       int(moments["m01"] / moments["m00"])))
+        aire = cv2.contourArea(contour)
+        if aire > aire_min:
+            mesures.append((aire, contour))
+    mesures.sort(key=lambda t: t[0], reverse=True)
+
+    for aire, contour in mesures[:int(cfg.get("points_max", 24))]:
+        plein = np.zeros((hauteur, largeur), dtype=np.uint8)
+        cv2.drawContours(plein, [contour], -1, 255, -1)
+        distance = cv2.distanceTransform(plein, cv2.DIST_L2, 3)
+        _, maxi, _, position = cv2.minMaxLoc(distance)
+        if maxi > 0:
+            points.append((int(position[0]), int(position[1])))
+
+    grille = max(1, int(cfg.get("points_grille", 3)))
+    for iy in range(grille):
+        for ix in range(grille):
+            points.append((int(largeur * (ix + 0.5) / grille),
+                           int(hauteur * (iy + 0.5) / grille)))
     points.append((largeur // 2, hauteur // 2))
-    uniques = []
-    for p in points:
-        if p not in uniques:
-            uniques.append(p)
-    return uniques
+
+    # Dedoublonnage par distance : deux points voisins donnent le meme masque
+    # pour un cout de decodage double.
+    minimum = max(4.0, 0.02 * ((hauteur ** 2 + largeur ** 2) ** 0.5))
+    retenus = []
+    for x, y in points:
+        x = min(max(0, x), largeur - 1)
+        y = min(max(0, y), hauteur - 1)
+        if any(((x - px) ** 2 + (y - py) ** 2) ** 0.5 < minimum for px, py in retenus):
+            continue
+        retenus.append((x, y))
+        if len(retenus) >= int(cfg.get("points_max", 24)):
+            break
+    return retenus
+
+
+def est_masque_de_fond(masque, cfg, np):
+    """Vrai si le masque decrit le fond de l'image plutot qu'un element.
+
+    Deux symptomes, constates sur une photo d'oiseaux dans un grand ciel : le
+    masque couvre l'essentiel du recadrage, ou il longe plusieurs bords a la
+    fois. Un tel masque obtient un excellent score - il est correct, c'est
+    juste le complement de ce que l'utilisateur voulait.
+    """
+    hauteur, largeur = masque.shape[:2]
+    total = float(max(1, hauteur * largeur))
+    proportion = float(np.count_nonzero(masque)) / total
+    if proportion > float(cfg.get("aire_max_masque_ratio", 0.60)):
+        return True, proportion
+    lignes = [masque[0, :], masque[-1, :], masque[:, 0], masque[:, -1]]
+    touches = 0
+    for ligne in lignes:
+        if float(np.count_nonzero(ligne)) / float(max(1, ligne.size)) > 0.5:
+            touches += 1
+    if touches >= int(cfg.get("bords_touches_fond", 3)) and proportion > 0.30:
+        return True, proportion
+    return False, proportion
+
+
+def composantes_connexes(masque, aire_min, np):
+    """Decoupe un masque en ses taches disjointes.
+
+    Utile sur le complement d'un masque de fond : l'inverse du ciel contient
+    tous les sujets d'un coup, alors que l'utilisateur en attend un par calque.
+    """
+    import cv2
+
+    nombre, etiquettes, statistiques, _ = cv2.connectedComponentsWithStats(
+        masque, connectivity=8)
+    morceaux = []
+    for index in range(1, nombre):
+        aire = int(statistiques[index, cv2.CC_STAT_AREA])
+        if aire < aire_min:
+            continue
+        morceaux.append((aire, np.where(etiquettes == index, 255, 0).astype(np.uint8)))
+    morceaux.sort(key=lambda t: t[0], reverse=True)
+    return morceaux
 
 
 def run():
@@ -1955,10 +2043,16 @@ def run():
             sorties = decodeur.run(None, alimentation)
             return dict(zip(noms_sortie_dec, sorties))
 
-        ratio_contour = float(cfg.get("aire_min_contour_ratio", 0.03))
-        candidats = points_candidats(crop, ratio_contour, np)
+        candidats = points_candidats(crop, cfg, np)
+        aire_min = float(crop_h * crop_w) * float(cfg.get("aire_min_masque_ratio", 0.002))
+
+        def masque_depuis_logits(logits):
+            redim = cv2.resize(logits.astype(np.float32), (crop_w, crop_h),
+                               interpolation=cv2.INTER_LINEAR)
+            return np.where(redim > 0.0, 255, 0).astype(np.uint8)
 
         bruts = []
+        fonds = []
         for point in candidats:
             try:
                 sortie = executer_decodeur(point)
@@ -1981,31 +2075,63 @@ def run():
                 masques = masques[0]
             if masques.ndim == 3:
                 masques = masques[np.newaxis, ...]
+
+            nombre = masques.shape[1]
             if scores is None:
-                indice, score = 0, 1.0
+                classement = [(1.0, 0)]
             else:
                 scores = np.asarray(scores).reshape(-1)
-                indice = int(np.argmax(scores))
-                indice = min(indice, masques.shape[1] - 1)
-                score = float(scores[indice])
+                classement = sorted(
+                    ((float(scores[i]), i) for i in range(min(nombre, scores.size))),
+                    reverse=True)
 
-            logits = masques[0, indice].astype(np.float32)
-            redim = cv2.resize(logits, (crop_w, crop_h), interpolation=cv2.INTER_LINEAR)
-            binaire = np.where(redim > 0.0, 255, 0).astype(np.uint8)
-            bruts.append({"masque": binaire, "score": score, "point": list(point)})
+            # SAM 2 propose plusieurs masques par point : on retient le
+            # meilleur qui ne soit pas le fond, au lieu du meilleur tout court.
+            garde = None
+            meilleur_fond = None
+            for score, indice in classement:
+                binaire = masque_depuis_logits(masques[0, indice])
+                fond, proportion = est_masque_de_fond(binaire, cfg, np)
+                entree = {"masque": binaire, "score": score, "point": list(point),
+                          "proportion": round(proportion, 4)}
+                if fond:
+                    if meilleur_fond is None:
+                        meilleur_fond = entree
+                    continue
+                garde = entree
+                break
+            if garde is not None:
+                bruts.append(garde)
+            elif meilleur_fond is not None:
+                fonds.append(meilleur_fond)
+
+        seuil = float(cfg.get("score_min", 0.85))
+        recouvrement_max = float(cfg.get("nms_recouvrement_max", 0.60))
+        seuil_abaisse = False
+        fond_inverse = False
+
+        if not bruts and fonds:
+            # L'IA n'a isole que le fond. Son complement contient exactement
+            # les sujets : on le decoupe en taches disjointes pour retrouver un
+            # element par calque, au lieu de rendre un message d'erreur.
+            fonds.sort(key=lambda d: d["score"], reverse=True)
+            complement = np.where(fonds[0]["masque"] > 0, 0, 255).astype(np.uint8)
+            for aire, morceau in composantes_connexes(complement, aire_min, np):
+                bruts.append({"masque": morceau, "score": fonds[0]["score"],
+                              "point": fonds[0]["point"], "aire": aire,
+                              "proportion": round(aire / float(crop_h * crop_w), 4)})
+            fond_inverse = bool(bruts)
 
         if not bruts:
             sortir(dossier, "masque_vide", "[ERR_MASQUE_VIDE]", CODE_MASQUE_VIDE,
-                   "le decodeur n'a renvoye aucun masque exploitable")
+                   "aucun masque exploitable : le modele n'a renvoye que des "
+                   "masques de fond sur les %d points essayes" % len(candidats),
+                   {"points_essayes": len(candidats),
+                    "masques_de_fond_rejetes": len(fonds)})
             return
 
         bruts.sort(key=lambda d: d["score"], reverse=True)
-        seuil = float(cfg.get("score_min", 0.85))
-        aire_min = float(crop_h * crop_w) * float(cfg.get("aire_min_masque_ratio", 0.02))
-        recouvrement_max = float(cfg.get("nms_recouvrement_max", 0.60))
-
         retenus_seuil = [d for d in bruts if d["score"] >= seuil]
-        seuil_abaisse = False
         if not retenus_seuil:
             # Degrader plutot que s'interrompre : l'utilisateur voulait
             # detourer une image, pas arbitrer un score de confiance.
@@ -2015,9 +2141,9 @@ def run():
         finaux = []
         for candidat in retenus_seuil:
             aire = int(np.count_nonzero(candidat["masque"]))
-            if aire < aire_min and finaux:
-                continue
             if aire == 0:
+                continue
+            if aire < aire_min and finaux:
                 continue
             garder = True
             for deja in finaux:
@@ -2091,6 +2217,9 @@ def run():
                 "fournisseurs_demandes": demandes,
                 "fournisseurs_disponibles": disponibles,
                 "seuil_score_abaisse": seuil_abaisse,
+                "points_essayes": len(candidats),
+                "masques_de_fond_rejetes": len(fonds),
+                "masque_de_fond_inverse": fond_inverse,
                 "profondeur_source": str(profondeur),
                 "source_grise": bool(est_gris),
                 "alpha_source": alpha_source is not None,
@@ -2309,6 +2438,10 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
                 "nms_recouvrement_max": NMS_RECOUVREMENT_MAX,
                 "aire_min_masque_ratio": AIRE_MIN_MASQUE_RATIO,
                 "aire_min_contour_ratio": AIRE_MIN_CONTOUR_RATIO,
+                "aire_max_masque_ratio": AIRE_MAX_MASQUE_RATIO,
+                "bords_touches_fond": BORDS_TOUCHES_FOND,
+                "points_grille": POINTS_GRILLE,
+                "points_max": POINTS_MAX,
                 "taille_entree": TAILLE_ENTREE_ENCODEUR,
                 "fournisseurs": ["CUDAExecutionProvider", "ROCMExecutionProvider",
                                  "DmlExecutionProvider", "CoreMLExecutionProvider",
@@ -2348,6 +2481,16 @@ class Sam2SegmentPlugin(Gimp.PlugIn):
                 avertissements.append(
                     "Aucun masque n'a atteint le score de confiance de %.2f : le "
                     "meilleur masque obtenu a ete conserve." % SCORE_MIN)
+            if resultat.get("masque_de_fond_inverse"):
+                avertissements.append(
+                    "L'IA n'a su isoler que le fond de l'image. Les calques "
+                    "produits sont son complement, decoupe en elements "
+                    "distincts. Une selection autour du sujet donne en general "
+                    "un meilleur resultat.")
+            rejetes = int(resultat.get("masques_de_fond_rejetes") or 0)
+            if rejetes and not resultat.get("masque_de_fond_inverse"):
+                journal("%d masque(s) de fond ecarte(s) sur %s point(s) d'amorce"
+                        % (rejetes, resultat.get("points_essayes")))
 
             groupe = None
             try:

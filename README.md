@@ -106,6 +106,39 @@ volume téléchargé.
 
 ---
 
+## Comment le greffon choisit ce qu'il détoure
+
+SAM 2 ne devine pas ce qui vous intéresse : il segmente ce que désigne un
+« point d'amorce ». Le greffon en fabrique donc plusieurs, et trie les
+résultats.
+
+1. **Points issus des contours.** Les contours détectés sont refermés puis
+   remplis, et le point retenu est le plus intérieur de chaque forme
+   (transformée de distance). C'est le détail qui compte : le centre de gravité
+   d'un contour tombe souvent à côté du sujet — entre deux ailes, par exemple —
+   et SAM 2 segmente alors le ciel sans se plaindre.
+2. **Grille régulière** de 3 x 3 points, pour les sujets que la détection de
+   contours manque. Au total, 24 points au maximum ; chacun coûte un décodage,
+   l'encodage n'ayant lieu qu'une fois.
+3. **Rejet des masques de fond.** Un masque qui couvre plus de 60 % du
+   recadrage, ou qui longe au moins trois bords, décrit le fond et non un
+   élément. Il est écarté *même avec un score excellent* : il est correct, c'est
+   simplement le complément de ce que vous voulez. Pour chaque point, SAM 2
+   propose plusieurs masques ; le greffon retient le meilleur qui ne soit pas
+   le fond, au lieu du meilleur tout court.
+4. **Dédoublonnage** : deux masques qui se recouvrent à plus de 60 % sont le
+   même élément.
+5. **Repli** : si tous les masques obtenus sont des fonds, le greffon inverse le
+   meilleur d'entre eux et découpe ce complément en taches disjointes — un
+   calque par sujet. Vous obtenez un résultat, avec la mention du procédé, au
+   lieu d'un message d'erreur.
+
+**Une sélection autour du sujet reste le meilleur conseil** : elle recadre le
+travail, fait basculer le choix vers un modèle plus fin, et évite au greffon de
+deviner.
+
+---
+
 ## Ce que le greffon écrit sur le disque
 
 `Gimp.directory()` vaut `AppData\Roaming` sous Windows, synchronisé à chaque
@@ -186,7 +219,7 @@ reconstruit et relance une fois, sans rien demander.
   téléchargement et de segmentation restent des cases vides dans la table des
   valeurs, et le resteront tant qu'une exécution réelle ne les aura pas
   remplies.
-- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 97
+- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 108
   contrôles automatiques hors de GIMP (voir ci-dessous), dont une inférence
   complète contre un double d'`onnxruntime`. Les chemins qui touchent l'API GIMP
   elle-même — export du calque désigné, insertion des calques, fenêtre d'options
@@ -207,7 +240,7 @@ python3 outils/tous_les_tests.py       # tout, avec un résumé et un code de re
 
 python3 outils/verifier_livraison.py   # 12 contrôles de livraison + empreinte SHA-256
 python3 outils/tests_unitaires.py      # 72 contrôles, doublure GIMP + serveur HTTP local
-python3 outils/tests_worker.py         # 25 contrôles, inférence complète contre un double
+python3 outils/tests_worker.py         # 36 contrôles, inférence complète contre un double
 ```
 
 `tests_unitaires.py` et `verifier_livraison.py` n'ont besoin de rien d'autre que
@@ -219,6 +252,11 @@ normalisation de l'entrée de l'encodeur, les quatre cas de canaux, la profondeu
 16 bits, le refus d'un téléchargement au-delà du seuil **sans transférer un
 octet**, la dégradation de variante, la migration d'un ancien venv, la purge des
 archives, et la fidélité de la documentation aux constantes du code.
+
+Le cas signalé en production — trois sujets de 1,4 % de l'image dans un grand
+ciel, dont le greffon ne sortait qu'un seul calque contenant le fond — a sa
+propre régression (`test_sujets_dans_grand_ciel`). Elle échoue si l'on remet les
+seuils de la v6.0 : un calque, couvrant 96 % de l'image.
 
 ### Tester depuis un état vierge
 

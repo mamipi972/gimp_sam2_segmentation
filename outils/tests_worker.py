@@ -39,10 +39,15 @@ FICHIER_GREFFON = os.path.join(RACINE, "gimp_sam2_segmentation",
 
 RAYON_DISQUE_1024 = 120.0
 
-FAUX_ONNXRUNTIME = '''
+MODELE_FAUX_ORT = """
+import json
+import os
+
 import numpy as np
 
-RAYON = %f
+RAYON = __RAYON__
+FORMES = json.loads(os.environ.get("TEST_FORMES", "[]"))
+TOUT_FOND = os.environ.get("TEST_TOUT_FOND") == "1"
 
 
 class _Info:
@@ -53,6 +58,22 @@ class _Info:
 
 def get_available_providers():
     return ["CPUExecutionProvider"]
+
+
+def _ellipse(cx, cy, rx, ry, marge=1.0):
+    gy, gx = np.mgrid[0:1024, 0:1024]
+    return (((gx - cx) / (rx * marge)) ** 2 + ((gy - cy) / (ry * marge)) ** 2) <= 1.0
+
+
+def _union_formes(marge=1.0):
+    union = np.zeros((1024, 1024), dtype=bool)
+    for cx, cy, rx, ry in FORMES:
+        union |= _ellipse(cx, cy, rx, ry, marge)
+    return union
+
+
+def _logits(booleen):
+    return np.where(booleen, 10.0, -10.0).astype(np.float32)
 
 
 class InferenceSession:
@@ -86,8 +107,8 @@ class InferenceSession:
             # Normalisation ImageNet : une entree simplement divisee par 255
             # resterait dans [0, 1]. On exige des valeurs negatives et une
             # amplitude superieure a 1.
-            assert entree.min() < -0.1, "entree non normalisee (min=%%r)" %% entree.min()
-            assert entree.max() > 1.0, "entree non normalisee (max=%%r)" %% entree.max()
+            assert entree.min() < -0.1, "entree non normalisee (min=" + repr(entree.min()) + ")"
+            assert entree.max() > 1.0, "entree non normalisee (max=" + repr(entree.max()) + ")"
             with open(os.environ["TEST_TRACE_ENCODEUR"], "w") as f:
                 f.write(json.dumps({"min": float(entree.min()),
                                     "max": float(entree.max())}))
@@ -99,17 +120,71 @@ class InferenceSession:
         px, py = float(coords[0, 0, 0]), float(coords[0, 0, 1])
         with open(os.environ["TEST_TRACE_POINTS"], "a") as f:
             f.write(json.dumps([px, py]) + chr(10))
-        grille_y, grille_x = np.mgrid[0:1024, 0:1024]
-        distance = np.sqrt((grille_x - px) ** 2 + (grille_y - py) ** 2)
-        logits = np.where(distance <= RAYON, 10.0, -10.0).astype(np.float32)
-        masques = np.stack([logits, logits * 0.5, logits * 0.25])[np.newaxis, ...]
-        scores = np.array([[0.93, 0.44, 0.21]], dtype=np.float32)
-        return [masques, scores]
+
+        if not FORMES:
+            # Comportement simple : un disque centre sur le point recu.
+            gy, gx = np.mgrid[0:1024, 0:1024]
+            distance = np.sqrt((gx - px) ** 2 + (gy - py) ** 2)
+            logits = _logits(distance <= RAYON)
+            masques = np.stack([logits, logits * 0.5, logits * 0.25])[np.newaxis, ...]
+            return [masques, np.array([[0.93, 0.44, 0.21]], dtype=np.float32)]
+
+        # Comportement realiste : sur un sujet, SAM 2 rend le sujet ; sur un
+        # fond lisse, il rend le fond, avec un excellent score.
+        touche = None
+        if not TOUT_FOND:
+            for cx, cy, rx, ry in FORMES:
+                if ((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 <= 1.0:
+                    touche = (cx, cy, rx, ry)
+                    break
+
+        if touche is not None:
+            forme = _ellipse(*touche)
+            masques = np.stack([_logits(forme), _logits(_ellipse(*touche, marge=1.3)),
+                                _logits(_ellipse(*touche, marge=0.4))])[np.newaxis, ...]
+            return [masques, np.array([[0.95, 0.60, 0.35]], dtype=np.float32)]
+
+        fond = ~_union_formes()
+        fond_large = ~_union_formes(marge=2.0)
+        masques = np.stack([_logits(fond), _logits(fond_large),
+                            _logits(fond)])[np.newaxis, ...]
+        return [masques, np.array([[0.99, 0.72, 0.51]], dtype=np.float32)]
+"""
+
+FAUX_ONNXRUNTIME = MODELE_FAUX_ORT.replace("__RAYON__", repr(RAYON_DISQUE_1024))
 
 
-import json
-import os
-''' % RAYON_DISQUE_1024
+def constantes_greffon():
+    """Constantes reellement definies dans le greffon.
+
+    Le test les relit au lieu de les recopier : un seuil recopie derive, et un
+    test qui s'execute avec d'autres valeurs que celles livrees ne prouve rien.
+    """
+    source = open(FICHIER_GREFFON, encoding="utf-8").read()
+    valeurs = {}
+    for noeud in ast.parse(source).body:
+        if not isinstance(noeud, ast.Assign) or len(noeud.targets) != 1:
+            continue
+        cible = noeud.targets[0]
+        if not isinstance(cible, ast.Name) or not cible.id.isupper():
+            continue
+        try:
+            valeurs[cible.id] = ast.literal_eval(noeud.value)
+        except Exception:
+            continue
+    return valeurs
+
+
+CONSTANTES = None
+
+
+def constante(nom):
+    global CONSTANTES
+    if CONSTANTES is None:
+        CONSTANTES = constantes_greffon()
+    if nom not in CONSTANTES:
+        raise SystemExit("constante %s introuvable dans le greffon" % nom)
+    return CONSTANTES[nom]
 
 
 def extraire_worker():
@@ -125,8 +200,9 @@ def extraire_worker():
 class Bac:
     """Dossier de travail isole, avec ou sans le double d'onnxruntime."""
 
-    def __init__(self, avec_onnxruntime=True):
+    def __init__(self, avec_onnxruntime=True, scenario=None):
         self.dossier = tempfile.mkdtemp(prefix="test_sam2_")
+        self.scenario = scenario or {}
         self.avec_onnxruntime = avec_onnxruntime
         self.faux = os.path.join(self.dossier, "faux_paquets")
         os.makedirs(self.faux, exist_ok=True)
@@ -149,6 +225,7 @@ class Bac:
         env["PYTHONPATH"] = self.faux if self.avec_onnxruntime else ""
         env["TEST_TRACE_POINTS"] = os.path.join(self.dossier, "points.jsonl")
         env["TEST_TRACE_ENCODEUR"] = os.path.join(self.dossier, "encodeur.json")
+        env.update(self.scenario)
         proc = subprocess.run([sys.executable, self.worker, chemin_cfg],
                               capture_output=True, env=env, timeout=300)
         resultat = {}
@@ -170,13 +247,17 @@ class Bac:
             "variante": "tiny",
             "mode": 0,
             "max_elements": 5,
-            "marge_ratio": 0.20,
-            "marge_min_px": 32,
-            "score_min": 0.85,
-            "nms_recouvrement_max": 0.60,
-            "aire_min_masque_ratio": 0.02,
-            "aire_min_contour_ratio": 0.03,
-            "taille_entree": 1024,
+            "marge_ratio": constante("MARGE_ROI_RATIO"),
+            "marge_min_px": constante("MARGE_ROI_MIN_PX"),
+            "score_min": constante("SCORE_MIN"),
+            "nms_recouvrement_max": constante("NMS_RECOUVREMENT_MAX"),
+            "aire_min_masque_ratio": constante("AIRE_MIN_MASQUE_RATIO"),
+            "aire_min_contour_ratio": constante("AIRE_MIN_CONTOUR_RATIO"),
+            "aire_max_masque_ratio": constante("AIRE_MAX_MASQUE_RATIO"),
+            "bords_touches_fond": constante("BORDS_TOUCHES_FOND"),
+            "points_grille": constante("POINTS_GRILLE"),
+            "points_max": constante("POINTS_MAX"),
+            "taille_entree": constante("TAILLE_ENTREE_ENCODEUR"),
             "fournisseurs": ["CUDAExecutionProvider", "CPUExecutionProvider"],
         }
         base.update(extra)
@@ -374,12 +455,117 @@ def test_sorties_en_echec():
         bac.nettoyer()
 
 
+def image_sujets_dans_grand_ciel(largeur, hauteur, sujets):
+    """Reproduit le cas signale : des sujets sombres et petits sur un degrade
+    lisse, chacun autour de 1,5 % de la surface de l'image."""
+    degrade = np.linspace(210, 130, hauteur).astype(np.uint8)
+    image = np.repeat(degrade[:, np.newaxis], largeur, axis=1)
+    image = np.dstack([image, image, np.clip(image.astype(np.int32) + 20, 0, 255)
+                       .astype(np.uint8)])
+    for cx, cy, rx, ry in sujets:
+        cv2.ellipse(image, (cx, cy), (rx, ry), 0, 0, 360, (35, 40, 55), -1)
+    return image
+
+
+def test_sujets_dans_grand_ciel():
+    print("Cas 5 : petits sujets dans un grand ciel (cas signale en production)")
+    largeur, hauteur = 1280, 800
+    sujets = [(320, 250, 100, 45), (250, 560, 100, 45), (620, 600, 100, 45)]
+    formes_1024 = [[cx * 1024.0 / largeur, cy * 1024.0 / hauteur,
+                    rx * 1024.0 / largeur, ry * 1024.0 / hauteur]
+                   for cx, cy, rx, ry in sujets]
+    part = np.pi * 100 * 45 / float(largeur * hauteur)
+    print("       (chaque sujet couvre %.2f %% de l'image)" % (100 * part))
+
+    bac = Bac(scenario={"TEST_FORMES": json.dumps(formes_1024)})
+    try:
+        image = image_sujets_dans_grand_ciel(largeur, hauteur, sujets)
+        chemin = os.path.join(bac.dossier, "ciel.png")
+        cv2.imwrite(chemin, image)
+        sortie = bac.executer(bac.parametres(chemin,
+                                             roi=[False, 0, 0, largeur, hauteur]))
+        resultat = sortie["resultat"]
+        controler("statut succes", resultat.get("statut") == "succes",
+                  str(resultat)[:300])
+        controler("un calque par sujet, ni plus ni moins",
+                  len(sortie["sorties"]) == len(sujets),
+                  "%d element(s)" % len(sortie["sorties"]))
+        controler("les masques de fond ont bien ete rencontres puis ecartes",
+                  int(resultat.get("masques_de_fond_rejetes") or 0) > 0,
+                  str(resultat.get("masques_de_fond_rejetes")))
+        controler("le repli par inversion du fond n'a pas ete necessaire",
+                  resultat.get("masque_de_fond_inverse") is False,
+                  str(resultat.get("masque_de_fond_inverse")))
+
+        centres_attendus = [(cx, cy) for cx, cy, _, _ in sujets]
+        trouves = []
+        aires = []
+        for nom in sortie["sorties"]:
+            rgba = cv2.imread(os.path.join(bac.dossier, nom), cv2.IMREAD_UNCHANGED)
+            alpha = rgba[:, :, 3]
+            aires.append(float(np.count_nonzero(alpha)) / (largeur * hauteur))
+            cm = centre_de_masse(alpha)
+            if cm:
+                trouves.append(cm)
+        controler("aucun calque ne contient le ciel",
+                  all(a < 0.60 for a in aires),
+                  "aires = %s" % [round(a, 3) for a in aires])
+        controler("chaque calque a la taille d'un sujet, pas d'un fond",
+                  all(0.005 < a < 0.05 for a in aires),
+                  "aires = %s" % [round(a, 4) for a in aires])
+        apparies = []
+        for cx, cy in centres_attendus:
+            distances = [((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 for x, y in trouves]
+            apparies.append(min(distances) if distances else 9999)
+        controler("les trois sujets sont retrouves a leur place",
+                  all(d < 25 for d in apparies),
+                  "distances = %s" % [round(d, 1) for d in apparies])
+    finally:
+        bac.nettoyer()
+
+
+def test_repli_inversion_du_fond():
+    print("Cas 6 : quand l'IA ne sait isoler que le fond")
+    largeur, hauteur = 1280, 800
+    sujets = [(320, 250, 100, 45), (250, 560, 100, 45), (620, 600, 100, 45)]
+    formes_1024 = [[cx * 1024.0 / largeur, cy * 1024.0 / hauteur,
+                    rx * 1024.0 / largeur, ry * 1024.0 / hauteur]
+                   for cx, cy, rx, ry in sujets]
+    bac = Bac(scenario={"TEST_FORMES": json.dumps(formes_1024),
+                        "TEST_TOUT_FOND": "1"})
+    try:
+        image = image_sujets_dans_grand_ciel(largeur, hauteur, sujets)
+        chemin = os.path.join(bac.dossier, "ciel.png")
+        cv2.imwrite(chemin, image)
+        sortie = bac.executer(bac.parametres(chemin,
+                                             roi=[False, 0, 0, largeur, hauteur]))
+        resultat = sortie["resultat"]
+        controler("le traitement aboutit quand meme",
+                  resultat.get("statut") == "succes", str(resultat)[:300])
+        controler("le repli par inversion du fond est signale",
+                  resultat.get("masque_de_fond_inverse") is True,
+                  str(resultat.get("masque_de_fond_inverse")))
+        controler("le complement du fond est decoupe en un calque par sujet",
+                  len(sortie["sorties"]) == len(sujets),
+                  "%d element(s)" % len(sortie["sorties"]))
+        if sortie["sorties"]:
+            rgba = cv2.imread(os.path.join(bac.dossier, sortie["sorties"][0]),
+                              cv2.IMREAD_UNCHANGED)
+            aire = float(np.count_nonzero(rgba[:, :, 3])) / (largeur * hauteur)
+            controler("le calque contient un sujet et non tout le ciel",
+                      aire < 0.05, "aire = %.4f" % aire)
+    finally:
+        bac.nettoyer()
+
+
 def main():
     print("Tests du worker SAM 2 (double d'onnxruntime, aucun modele reel)")
     print("")
     test_couleur_8bits()
     test_gris_et_alpha()
     test_16_bits()
+    test_sujets_dans_grand_ciel()
+    test_repli_inversion_du_fond()
     test_sorties_en_echec()
     print("")
     echecs = [nom for nom, ok, _ in RESULTATS if not ok]
