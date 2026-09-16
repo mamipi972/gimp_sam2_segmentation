@@ -260,12 +260,17 @@ reconstruit et relance une fois, sans rien demander.
   téléchargement et de segmentation restent des cases vides dans la table des
   valeurs, et le resteront tant qu'une exécution réelle ne les aura pas
   remplies.
-- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 148
-  contrôles automatiques hors de GIMP (voir ci-dessous), dont une inférence
-  complète contre un double d'`onnxruntime`. Les chemins qui touchent l'API GIMP
-  elle-même — export du calque désigné, insertion des calques, fenêtre d'options
-  — n'ont pas d'équivalent testable ici. Suivre le protocole de test depuis un
-  état vierge avant de considérer une version comme livrée.
+- **Ce qui a été vérifié dans GIMP, et par qui.** Les versions 6.1 à 6.3 ont été
+  exécutées par un utilisateur sous **Windows, GIMP 3.2**, avec le modèle
+  `sam2_hiera_tiny` sur processeur : installation de l'environnement,
+  téléchargement des modèles, détourage de trois sujets en trois calques et
+  calque de fond. Les corrections de la 6.4 (emplacements, API) n'ont pas encore
+  été exercées sur un poste réel. Le reste est couvert par 148 contrôles
+  automatiques hors de GIMP (voir ci-dessous), dont une inférence complète contre
+  un double d'`onnxruntime`. Aucun de ces contrôles ne touche l'API GIMP
+  elle-même : export du calque désigné, insertion des calques, fenêtre
+  d'options. Suivre le protocole de test depuis un état vierge avant de
+  considérer une version comme livrée.
 - **Une future GIMP majeure demandera une mise à jour du greffon.** L'API
   GObject `3.0` est celle de GIMP 3.0, 3.2, 3.4... : le numéro suit l'API, pas
   l'application, et ces versions-là fonctionnent sans rien changer. Une GIMP 4

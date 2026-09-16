@@ -65,9 +65,15 @@ def extraire(source, nom):
 
 
 def rendu_attendu(valeur):
-    """Forme sous laquelle une constante doit apparaitre dans le tableau."""
+    """Forme sous laquelle une constante doit apparaitre dans le tableau.
+
+    Un tuple de nombres est un numero de version - (3, 8) s'ecrit 3.8. Un
+    tuple de chaines est une liste de valeurs, qui s'enumere.
+    """
     if isinstance(valeur, tuple):
-        return ".".join(str(v) for v in valeur)
+        if all(isinstance(v, (int, float)) for v in valeur):
+            return ".".join(str(v) for v in valeur)
+        return ", ".join(str(v) for v in valeur)
     return str(valeur)
 
 
