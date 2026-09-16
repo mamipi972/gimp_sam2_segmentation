@@ -24,10 +24,71 @@ import tempfile
 import subprocess
 import traceback
 
+# Constantes necessaires avant le chargement de l'API, pour pouvoir ecrire un
+# journal meme si ce chargement echoue.
+PLUGIN_ID = "gimp_sam2_segment"
+SHARED_DIR_NAME = "ai_suite_shared"
+VARIABLE_DOSSIER = "GIMP_AI_SUITE_DIR"
+
+# Versions de l'API GObject de GIMP essayees, dans l'ordre. "3.0" est l'API de
+# GIMP 3.0, 3.2, 3.4... : le numero suit l'API, pas l'application. Une future
+# GIMP 4 apporterait une API "4.0", que le greffon tente alors plutot que de
+# disparaitre des menus sans un mot.
+API_GIMP_CANDIDATES = ("3.0", "4.0")
+
+
+def base_donnees():
+    """Racine des donnees volumineuses, suivant les conventions du systeme."""
+    if os.name == "nt":
+        return os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support")
+    return os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+
+
+def journal_amorcage(message):
+    """Journal ecrit sans l'API GIMP, pour les pannes qui la precedent.
+
+    Si le chargement de l'API echoue, le greffon disparait des menus sans
+    aucun message : ce fichier est alors la seule explication possible.
+    """
+    try:
+        dossier = os.environ.get(VARIABLE_DOSSIER, "").strip() or os.path.join(
+            base_donnees(), "GIMP", SHARED_DIR_NAME)
+        os.makedirs(dossier, exist_ok=True)
+        with open(os.path.join(dossier, "journal_amorcage.log"), "a",
+                  encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
+    except Exception:
+        pass
+
+
 import gi
-gi.require_version('Gimp', '3.0')
+
+API_GIMP = None
+_ERREURS_API = []
+for _version in API_GIMP_CANDIDATES:
+    try:
+        gi.require_version("Gimp", _version)
+        gi.require_version("GimpUi", _version)
+        API_GIMP = _version
+        break
+    except Exception as _erreur:
+        _ERREURS_API.append("%s: %s" % (_version, _erreur))
+
+if API_GIMP is None:
+    journal_amorcage(
+        "aucune version connue de l'API GIMP n'est disponible (%s). Le greffon "
+        "ne peut pas s'enregistrer ; il lui faut une mise a jour pour cette "
+        "version de GIMP." % " | ".join(_ERREURS_API))
+    raise ImportError("API GIMP indisponible : " + " | ".join(_ERREURS_API))
+
+if API_GIMP != API_GIMP_CANDIDATES[0]:
+    journal_amorcage(
+        "API GIMP %s utilisee a la place de %s : comportement non teste."
+        % (API_GIMP, API_GIMP_CANDIDATES[0]))
+
 from gi.repository import Gimp
-gi.require_version('GimpUi', '3.0')
 from gi.repository import GimpUi
 from gi.repository import Gio
 from gi.repository import GObject
@@ -41,10 +102,8 @@ if os.name == "nt":
 #    Toute valeur citee dans la documentation vient d'ici (voir
 #    TABLE_DES_VALEURS.md).
 # ==============================================================================
-PLUGIN_VERSION = "6.3"
-PLUGIN_ID = "gimp_sam2_segment"
+PLUGIN_VERSION = "6.4"
 PROCEDURE_NAME = "plug-in-sam2-segment"
-SHARED_DIR_NAME = "ai_suite_shared"
 
 # Nom de la pile technique. Il suffixe le venv, le marqueur d'environnement et
 # le cache d'interpreteur, pour qu'un autre greffon de la suite (pile torch,
@@ -210,12 +269,21 @@ def octets_lisibles(n):
 _DOSSIER_DONNEES = None
 
 
-def base_donnees():
-    if os.name == "nt":
-        return os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-    if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support")
-    return os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+def dossier_memorise():
+    """Dossier de donnees retenu lors d'une installation precedente.
+
+    Il est note dans le marqueur, qui vit avec le profil GIMP. Si la racine du
+    systeme a change - profil deplace, LOCALAPPDATA redirige, lettre de lecteur
+    differente - mais que l'ancien dossier existe toujours, autant le reprendre
+    que retelecharger.
+    """
+    try:
+        chemin = lire_marqueur().get("dossier_donnees")
+    except Exception:
+        return None
+    if chemin and os.path.isdir(chemin):
+        return chemin
+    return None
 
 
 def get_data_dir():
@@ -225,36 +293,55 @@ def get_data_dir():
     et le venv ne dependent pas de la version de GIMP : les indexer par
     version ferait retelecharger plusieurs centaines de megaoctets a chaque
     mise a jour, et laisserait l'ancien dossier immobilise sans que personne ne
-    le remarque. Un dossier versionne trouve ici est donc repris par simple
-    renommage.
+    le remarque.
+
+    Ordre de resolution : la variable d'environnement si elle est posee, puis
+    l'emplacement canonique, puis le dossier memorise par une installation
+    precedente, puis un dossier versionne a migrer.
     """
     global _DOSSIER_DONNEES
     if _DOSSIER_DONNEES:
         return _DOSSIER_DONNEES
 
+    force = os.environ.get(VARIABLE_DOSSIER, "").strip()
+    if force:
+        try:
+            os.makedirs(os.path.join(force, "models"), exist_ok=True)
+            _DOSSIER_DONNEES = force
+            journal("dossier de donnees impose par %s: %s" % (VARIABLE_DOSSIER, force))
+            return force
+        except Exception as e:
+            journal("dossier impose inutilisable (%s), retour aux conventions: %s"
+                    % (e, force))
+
     base = base_donnees()
     cible = os.path.join(base, "GIMP", SHARED_DIR_NAME)
     if not os.path.isdir(cible):
-        racine = os.path.join(base, "GIMP")
-        anciens = []
-        try:
-            for entree in sorted(os.listdir(racine)):
-                if entree == SHARED_DIR_NAME:
-                    continue
-                candidat = os.path.join(racine, entree, SHARED_DIR_NAME)
-                if os.path.isdir(candidat):
-                    anciens.append(candidat)
-        except Exception:
+        memorise = dossier_memorise()
+        if memorise:
+            journal("dossier de donnees repris du marqueur: " + memorise)
+            cible = memorise
+        else:
+            racine = os.path.join(base, "GIMP")
             anciens = []
-        if anciens:
-            ancien = anciens[0]
             try:
-                os.rename(ancien, cible)
-                journal("dossier de donnees migre: %s -> %s" % (ancien, cible))
-            except Exception as e:
-                journal("migration du dossier de donnees impossible (%s), "
-                        "reprise sur place: %s" % (e, ancien))
-                cible = ancien
+                for entree in sorted(os.listdir(racine)):
+                    if entree == SHARED_DIR_NAME:
+                        continue
+                    candidat = os.path.join(racine, entree, SHARED_DIR_NAME)
+                    if os.path.isdir(candidat):
+                        anciens.append(candidat)
+            except Exception:
+                anciens = []
+            if anciens:
+                ancien = anciens[0]
+                try:
+                    os.rename(ancien, cible)
+                    journal("dossier de donnees migre: %s -> %s" % (ancien, cible))
+                except Exception as e:
+                    journal("migration du dossier de donnees impossible (%s), "
+                            "reprise sur place: %s" % (e, ancien))
+                    cible = ancien
 
     try:
         os.makedirs(os.path.join(cible, "models"), exist_ok=True)
@@ -735,6 +822,14 @@ def lire_marqueur():
 def ecrire_marqueur(donnees):
     donnees = dict(donnees)
     donnees["version_greffon"] = PLUGIN_VERSION
+    donnees["api_gimp"] = API_GIMP
+    try:
+        # setdefault : une valeur transmise par l'appelant fait foi. Ecraser
+        # ici le dossier memorise reviendrait a perdre l'emplacement d'origine
+        # au premier enregistrement fait depuis une autre racine.
+        donnees.setdefault("dossier_donnees", _DOSSIER_DONNEES or get_data_dir())
+    except Exception:
+        pass
     donnees["signature_paquets"] = signature_paquets()
     donnees["ecrit_le"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     try:

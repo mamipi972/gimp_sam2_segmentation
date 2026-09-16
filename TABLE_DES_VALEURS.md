@@ -20,11 +20,13 @@ valeurs mesurées, et ils disent où.
 
 | Constante | Valeur | Nature | Rôle |
 | --- | --- | --- | --- |
-| `PLUGIN_VERSION` | 6.3 | déclarée | Version du greffon, consignée dans le marqueur d'environnement. Elle vit dans le code, jamais dans le nom du fichier. |
+| `PLUGIN_VERSION` | 6.4 | déclarée | Version du greffon, consignée dans le marqueur d'environnement. Elle vit dans le code, jamais dans le nom du fichier. |
 | `STACK_NAME` | onnx-cpu | déclarée | Nom de la pile technique. Il suffixe le venv, le marqueur et le cache d'interpréteur pour qu'un autre greffon de la suite ne réinstalle jamais par-dessus. |
 | `VENV_DIR_NAME` | venv-onnx-cpu | déclarée | Environnement virtuel dédié, sous le dossier de données volumineuses. |
 | `MARKER_FILE_NAME` | env_onnx-cpu.json | déclarée | Marqueur d'environnement, sous `Gimp.directory()`. |
 | `INTERPRETER_CACHE_NAME` | interpreteur_onnx-cpu.json | déclarée | Cache de l'interpréteur retenu, avec son canal de découverte et son horodatage. |
+| `VARIABLE_DOSSIER` | GIMP_AI_SUITE_DIR | déclarée | Variable d'environnement facultative qui impose l'emplacement des données volumineuses : autre disque, installation portable, dossier partagé d'entreprise. Jamais nécessaire — elle n'existe que pour les cas que les conventions du système ne couvrent pas. |
+| `API_GIMP_CANDIDATES` | 3.0 | déclarée | Versions de l'API GObject de GIMP essayées, dans l'ordre (`3.0` puis `4.0`). Le numéro suit l'API, pas l'application : GIMP 3.0, 3.2 et 3.4 partagent l'API `3.0`. |
 | `VARIABLE_DEBUG` | GIMP_AI_SUITE_DEBUG | déclarée | Variable d'environnement qui conserve le dossier d'exécution au lieu de le détruire. Outil de développement : l'archivage des journaux, lui, est automatique. |
 | `ARCHIVES_A_CONSERVER` | 10 | déclarée | Nombre d'incidents conservés sous `logs/` avant purge du plus ancien. |
 

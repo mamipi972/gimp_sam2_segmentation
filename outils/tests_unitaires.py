@@ -665,6 +665,70 @@ def test_dossier_de_donnees():
     finally:
         bac.fermer()
 
+    # Emplacement impose par variable d'environnement : autre disque, autre
+    # arborescence, installation portable.
+    bac = Bac()
+    impose = os.path.join(bac.dossier, "un_autre_disque", "modeles_ia")
+    os.environ["GIMP_AI_SUITE_DIR"] = impose
+    try:
+        m = faux_gimp.installer(bac.profil, CHEMIN_GREFFON)
+        controler("un dossier impose par l'environnement est respecte",
+                  m.get_data_dir() == impose, m.get_data_dir())
+        controler("le dossier impose recoit bien les modeles",
+                  os.path.isdir(os.path.join(impose, "models")))
+    finally:
+        os.environ.pop("GIMP_AI_SUITE_DIR", None)
+        bac.fermer()
+
+    # Racine systeme changee (profil deplace, LOCALAPPDATA redirige) : le
+    # dossier note dans le marqueur est repris plutot que retelecharge.
+    bac = Bac()
+    try:
+        ailleurs = os.path.join(bac.dossier, "ancien_disque", "ai_suite_shared")
+        os.makedirs(os.path.join(ailleurs, "models"), exist_ok=True)
+        temoin = os.path.join(ailleurs, "models", "sam2_hiera_tiny.decoder.onnx")
+        with open(temoin, "wb") as f:
+            f.write(faux_modele(6 * 1024 * 1024))
+        bac.module.ecrire_marqueur({"statut": "pret", "venv_python": temoin,
+                                    "dossier_donnees": ailleurs})
+        # Nouvelle session, meme profil GIMP, mais racine systeme vide.
+        neuf = os.path.join(bac.dossier, "nouvelle_racine")
+        os.makedirs(neuf, exist_ok=True)
+        for cle in ("LOCALAPPDATA", "XDG_DATA_HOME", "HOME"):
+            os.environ[cle] = neuf
+        m = faux_gimp.installer(bac.profil, CHEMIN_GREFFON)
+        controler("le dossier memorise dans le marqueur est repris",
+                  m.get_data_dir() == ailleurs, m.get_data_dir())
+        controler("les modeles deja presents sont retrouves sans telechargement",
+                  m.chercher_modele("sam2_hiera_tiny.decoder.onnx")[0] == temoin,
+                  str(m.chercher_modele("sam2_hiera_tiny.decoder.onnx")))
+    finally:
+        bac.fermer()
+
+
+def test_api_gimp():
+    print("Compatibilite : chargement de l'API GIMP")
+    bac = Bac()
+    m = bac.module
+    try:
+        controler("l'API essayee en premier est celle de GIMP 3",
+                  m.API_GIMP_CANDIDATES[0] == "3.0", str(m.API_GIMP_CANDIDATES))
+        controler("une API plus recente est prevue en repli",
+                  "4.0" in m.API_GIMP_CANDIDATES, str(m.API_GIMP_CANDIDATES))
+        m.journal_amorcage("test du journal d'amorcage")
+        chemin = os.path.join(m.get_data_dir(), "journal_amorcage.log")
+        controler("le journal d'amorcage s'ecrit sans l'API GIMP",
+                  os.path.isfile(chemin)
+                  and "test du journal" in open(chemin, encoding="utf-8").read(),
+                  chemin)
+        m.ecrire_marqueur({"statut": "pret", "venv_python": CHEMIN_GREFFON})
+        marqueur = m.lire_marqueur()
+        controler("le marqueur consigne l'API utilisee et le dossier de donnees",
+                  marqueur.get("api_gimp") and marqueur.get("dossier_donnees"),
+                  str(marqueur))
+    finally:
+        bac.fermer()
+
 
 def main():
     print("Tests du greffon SAM 2 (doublure GIMP, serveur HTTP local)")
@@ -678,6 +742,7 @@ def main():
     test_selection_et_bornes()
     test_marqueur_et_migration()
     test_dossier_de_donnees()
+    test_api_gimp()
     test_journaux_et_messages()
     test_espace_disque()
     print("")

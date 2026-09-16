@@ -165,6 +165,26 @@ l'explorateur. C'est **AppData\Local**, pas `AppData\Roaming` où vit le profil
 GIMP — un profil itinérant d'entreprise est synchronisé à chaque ouverture de
 session, et quelques gigaoctets y deviennent un incident d'exploitation.
 
+### Si vos fichiers ne sont pas là où le greffon les cherche
+
+Le greffon les retrouve dans cet ordre, sans rien redemander ni retélécharger :
+
+1. la variable d'environnement `GIMP_AI_SUITE_DIR`, si vous l'avez posée — pour
+   un autre disque, une installation portable ou un dossier partagé ;
+2. l'emplacement canonique ci-dessus ;
+3. le dossier noté dans le marqueur lors d'une installation précédente, ce qui
+   couvre un profil déplacé, un `LOCALAPPDATA` redirigé ou une lettre de lecteur
+   différente ;
+4. un dossier versionné laissé par une version antérieure du greffon, repris par
+   simple renommage ;
+5. `<dossier GIMP>\ai_suite_shared\models`, qui suit automatiquement la version
+   de GIMP en cours — c'est là que les autres greffons de la suite déposent
+   parfois leurs poids ;
+6. à côté du fichier du greffon, en dépannage.
+
+Un modèle trouvé en 4, 5 ou 6 est rangé à l'emplacement canonique, et les
+doublons de taille identique sont supprimés.
+
 Ce dossier ne porte **pas** de numéro de version de GIMP : les poids ONNX et
 l'environnement Python n'en dépendent pas, et les indexer par version ferait
 tout retélécharger à chaque mise à jour de GIMP. Un dossier versionné laissé par
@@ -240,12 +260,20 @@ reconstruit et relance une fois, sans rien demander.
   téléchargement et de segmentation restent des cases vides dans la table des
   valeurs, et le resteront tant qu'une exécution réelle ne les aura pas
   remplies.
-- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 128
+- **Cette version n'a pas été exécutée dans GIMP.** Elle a été validée par 148
   contrôles automatiques hors de GIMP (voir ci-dessous), dont une inférence
   complète contre un double d'`onnxruntime`. Les chemins qui touchent l'API GIMP
   elle-même — export du calque désigné, insertion des calques, fenêtre d'options
   — n'ont pas d'équivalent testable ici. Suivre le protocole de test depuis un
   état vierge avant de considérer une version comme livrée.
+- **Une future GIMP majeure demandera une mise à jour du greffon.** L'API
+  GObject `3.0` est celle de GIMP 3.0, 3.2, 3.4... : le numéro suit l'API, pas
+  l'application, et ces versions-là fonctionnent sans rien changer. Une GIMP 4
+  apporterait une API `4.0` : le greffon la tente alors, mais son
+  fonctionnement sur cette API n'est ni testé ni garanti. En cas d'échec, il
+  écrit `journal_amorcage.log` dans le dossier des données plutôt que de
+  disparaître des menus sans un mot. Les modèles et l'environnement, eux, ne
+  sont jamais perdus : ils ne dépendent pas de la version de GIMP.
 - **Flatpak n'est pas pris en charge.** Le bac à sable rend tout Python système
   inaccessible ; le greffon le détecte et le dit, plutôt que d'échouer de façon
   obscure.
@@ -259,8 +287,8 @@ reconstruit et relance une fois, sans rien demander.
 ```bash
 python3 outils/tous_les_tests.py       # tout, avec un résumé et un code de retour
 
-python3 outils/verifier_livraison.py   # 13 contrôles de livraison + empreinte SHA-256
-python3 outils/tests_unitaires.py      # 78 contrôles, doublure GIMP + serveur HTTP local
+python3 outils/verifier_livraison.py   # 12 contrôles de livraison + empreinte SHA-256
+python3 outils/tests_unitaires.py      # 86 contrôles, doublure GIMP + serveur HTTP local
 python3 outils/tests_worker.py         # 50 contrôles, inférence complète contre un double
 ```
 
