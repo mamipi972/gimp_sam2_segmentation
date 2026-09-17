@@ -24,71 +24,10 @@ import tempfile
 import subprocess
 import traceback
 
-# Constantes necessaires avant le chargement de l'API, pour pouvoir ecrire un
-# journal meme si ce chargement echoue.
-PLUGIN_ID = "gimp_sam2_segment"
-SHARED_DIR_NAME = "ai_suite_shared"
-VARIABLE_DOSSIER = "GIMP_AI_SUITE_DIR"
-
-# Versions de l'API GObject de GIMP essayees, dans l'ordre. "3.0" est l'API de
-# GIMP 3.0, 3.2, 3.4... : le numero suit l'API, pas l'application. Une future
-# GIMP 4 apporterait une API "4.0", que le greffon tente alors plutot que de
-# disparaitre des menus sans un mot.
-API_GIMP_CANDIDATES = ("3.0", "4.0")
-
-
-def base_donnees():
-    """Racine des donnees volumineuses, suivant les conventions du systeme."""
-    if os.name == "nt":
-        return os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-    if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support")
-    return os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-
-
-def journal_amorcage(message):
-    """Journal ecrit sans l'API GIMP, pour les pannes qui la precedent.
-
-    Si le chargement de l'API echoue, le greffon disparait des menus sans
-    aucun message : ce fichier est alors la seule explication possible.
-    """
-    try:
-        dossier = os.environ.get(VARIABLE_DOSSIER, "").strip() or os.path.join(
-            base_donnees(), "GIMP", SHARED_DIR_NAME)
-        os.makedirs(dossier, exist_ok=True)
-        with open(os.path.join(dossier, "journal_amorcage.log"), "a",
-                  encoding="utf-8") as f:
-            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
-    except Exception:
-        pass
-
-
 import gi
-
-API_GIMP = None
-_ERREURS_API = []
-for _version in API_GIMP_CANDIDATES:
-    try:
-        gi.require_version("Gimp", _version)
-        gi.require_version("GimpUi", _version)
-        API_GIMP = _version
-        break
-    except Exception as _erreur:
-        _ERREURS_API.append("%s: %s" % (_version, _erreur))
-
-if API_GIMP is None:
-    journal_amorcage(
-        "aucune version connue de l'API GIMP n'est disponible (%s). Le greffon "
-        "ne peut pas s'enregistrer ; il lui faut une mise a jour pour cette "
-        "version de GIMP." % " | ".join(_ERREURS_API))
-    raise ImportError("API GIMP indisponible : " + " | ".join(_ERREURS_API))
-
-if API_GIMP != API_GIMP_CANDIDATES[0]:
-    journal_amorcage(
-        "API GIMP %s utilisee a la place de %s : comportement non teste."
-        % (API_GIMP, API_GIMP_CANDIDATES[0]))
-
+gi.require_version('Gimp', '3.0')
 from gi.repository import Gimp
+gi.require_version('GimpUi', '3.0')
 from gi.repository import GimpUi
 from gi.repository import Gio
 from gi.repository import GObject
@@ -102,8 +41,10 @@ if os.name == "nt":
 #    Toute valeur citee dans la documentation vient d'ici (voir
 #    TABLE_DES_VALEURS.md).
 # ==============================================================================
-PLUGIN_VERSION = "6.4"
+PLUGIN_VERSION = "6.3"
+PLUGIN_ID = "gimp_sam2_segment"
 PROCEDURE_NAME = "plug-in-sam2-segment"
+SHARED_DIR_NAME = "ai_suite_shared"
 
 # Nom de la pile technique. Il suffixe le venv, le marqueur d'environnement et
 # le cache d'interpreteur, pour qu'un autre greffon de la suite (pile torch,
@@ -186,6 +127,13 @@ TAILLE_ENTREE_ENCODEUR = 1024
 
 # Archivage des journaux et mode de mise au point.
 VARIABLE_DEBUG = "GIMP_AI_SUITE_DEBUG"
+# Fichier depose dans chaque archive de journaux pour dire quel greffon l'a
+# produite. Le dossier logs/ est partage par toute la suite : sans ce marqueur,
+# un greffon ne sait pas distinguer ses archives de celles des autres.
+NOM_FICHIER_INCIDENT = "incident.json"
+# Age au-dela duquel une archive que personne ne revendique peut etre
+# supprimee. Elles viennent des versions anterieures a ce marqueur.
+JOURS_ARCHIVES_ORPHELINES = 30
 ARCHIVES_A_CONSERVER = 10
 
 # Variantes de modele. Les tailles sont DECLAREES d'apres la page du depot
@@ -269,21 +217,12 @@ def octets_lisibles(n):
 _DOSSIER_DONNEES = None
 
 
-def dossier_memorise():
-    """Dossier de donnees retenu lors d'une installation precedente.
-
-    Il est note dans le marqueur, qui vit avec le profil GIMP. Si la racine du
-    systeme a change - profil deplace, LOCALAPPDATA redirige, lettre de lecteur
-    differente - mais que l'ancien dossier existe toujours, autant le reprendre
-    que retelecharger.
-    """
-    try:
-        chemin = lire_marqueur().get("dossier_donnees")
-    except Exception:
-        return None
-    if chemin and os.path.isdir(chemin):
-        return chemin
-    return None
+def base_donnees():
+    if os.name == "nt":
+        return os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support")
+    return os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
 
 
 def get_data_dir():
@@ -293,55 +232,36 @@ def get_data_dir():
     et le venv ne dependent pas de la version de GIMP : les indexer par
     version ferait retelecharger plusieurs centaines de megaoctets a chaque
     mise a jour, et laisserait l'ancien dossier immobilise sans que personne ne
-    le remarque.
-
-    Ordre de resolution : la variable d'environnement si elle est posee, puis
-    l'emplacement canonique, puis le dossier memorise par une installation
-    precedente, puis un dossier versionne a migrer.
+    le remarque. Un dossier versionne trouve ici est donc repris par simple
+    renommage.
     """
     global _DOSSIER_DONNEES
     if _DOSSIER_DONNEES:
         return _DOSSIER_DONNEES
 
-    force = os.environ.get(VARIABLE_DOSSIER, "").strip()
-    if force:
-        try:
-            os.makedirs(os.path.join(force, "models"), exist_ok=True)
-            _DOSSIER_DONNEES = force
-            journal("dossier de donnees impose par %s: %s" % (VARIABLE_DOSSIER, force))
-            return force
-        except Exception as e:
-            journal("dossier impose inutilisable (%s), retour aux conventions: %s"
-                    % (e, force))
-
     base = base_donnees()
     cible = os.path.join(base, "GIMP", SHARED_DIR_NAME)
     if not os.path.isdir(cible):
-        memorise = dossier_memorise()
-        if memorise:
-            journal("dossier de donnees repris du marqueur: " + memorise)
-            cible = memorise
-        else:
-            racine = os.path.join(base, "GIMP")
+        racine = os.path.join(base, "GIMP")
+        anciens = []
+        try:
+            for entree in sorted(os.listdir(racine)):
+                if entree == SHARED_DIR_NAME:
+                    continue
+                candidat = os.path.join(racine, entree, SHARED_DIR_NAME)
+                if os.path.isdir(candidat):
+                    anciens.append(candidat)
+        except Exception:
             anciens = []
+        if anciens:
+            ancien = anciens[0]
             try:
-                for entree in sorted(os.listdir(racine)):
-                    if entree == SHARED_DIR_NAME:
-                        continue
-                    candidat = os.path.join(racine, entree, SHARED_DIR_NAME)
-                    if os.path.isdir(candidat):
-                        anciens.append(candidat)
-            except Exception:
-                anciens = []
-            if anciens:
-                ancien = anciens[0]
-                try:
-                    os.rename(ancien, cible)
-                    journal("dossier de donnees migre: %s -> %s" % (ancien, cible))
-                except Exception as e:
-                    journal("migration du dossier de donnees impossible (%s), "
-                            "reprise sur place: %s" % (e, ancien))
-                    cible = ancien
+                os.rename(ancien, cible)
+                journal("dossier de donnees migre: %s -> %s" % (ancien, cible))
+            except Exception as e:
+                journal("migration du dossier de donnees impossible (%s), "
+                        "reprise sur place: %s" % (e, ancien))
+                cible = ancien
 
     try:
         os.makedirs(os.path.join(cible, "models"), exist_ok=True)
@@ -822,14 +742,6 @@ def lire_marqueur():
 def ecrire_marqueur(donnees):
     donnees = dict(donnees)
     donnees["version_greffon"] = PLUGIN_VERSION
-    donnees["api_gimp"] = API_GIMP
-    try:
-        # setdefault : une valeur transmise par l'appelant fait foi. Ecraser
-        # ici le dossier memorise reviendrait a perdre l'emplacement d'origine
-        # au premier enregistrement fait depuis une autre racine.
-        donnees.setdefault("dossier_donnees", _DOSSIER_DONNEES or get_data_dir())
-    except Exception:
-        pass
     donnees["signature_paquets"] = signature_paquets()
     donnees["ecrit_le"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     try:
@@ -1581,19 +1493,113 @@ def ecrire_inventaire(details):
 #    une variable d'environnement pour produire un rapport de bogue : si le
 #    diagnostic depend de ce geste, il n'existe pas.
 # ==============================================================================
+def ecrire_marque_incident(cible, horodatage, contexte=None):
+    """Depose dans l'archive le fichier qui dit quel greffon l'a produite.
+
+    Il est ecrit avant la copie des journaux : si celle-ci echoue a mi-chemin,
+    l'archive reste identifiable, donc purgeable par son proprietaire.
+    """
+    try:
+        with open(os.path.join(cible, NOM_FICHIER_INCIDENT), "w",
+                  encoding="utf-8") as flux:
+            json.dump({"greffon": PLUGIN_ID, "version": PLUGIN_VERSION,
+                       "plateforme": sys.platform, "horodatage": horodatage,
+                       "contexte": contexte or {}}, flux, indent=2)
+    except Exception:
+        pass
+
+
+def lire_marque_incident(chemin):
+    """(greffon, date du marqueur) ou (None, 0.0) si l'archive n'en a pas."""
+    marque = os.path.join(chemin, NOM_FICHIER_INCIDENT)
+    if not os.path.isfile(marque):
+        return None, 0.0
+    try:
+        with open(marque, "r", encoding="utf-8", errors="replace") as flux:
+            donnees = json.load(flux)
+    except Exception:
+        return None, 0.0
+    if not isinstance(donnees, dict):
+        return None, 0.0
+    try:
+        date = os.path.getmtime(marque)
+    except OSError:
+        date = 0.0
+    return donnees.get("greffon"), date
+
+
+def purger_journaux(racine=None):
+    """Purge les archives de CE greffon, et rien d'autre.
+
+    Le dossier logs/ est partage par toute la suite, et deux conventions de
+    nommage y cohabitent : "2026-09-16_19-44-05" pour certains greffons,
+    "20260916-194405-000123" pour d'autres. En ASCII le tiret (0x2D) precede le
+    chiffre (0x30) : un tri alphabetique place donc systematiquement la
+    premiere forme en tete, et la purge qui s'y fiait supprimait toujours les
+    archives des greffons qui l'emploient, quel que soit leur age. Dix
+    incidents d'un voisin suffisaient a effacer tout l'historique - sans le
+    moindre message, puisqu'il n'y a pas d'incident quand un greffon
+    fonctionne, et c'est le jour ou l'on a besoin de ces journaux qu'on
+    decouvrait leur absence.
+
+    On ne purge donc que ce qu'on a produit, reconnaissable a son
+    incident.json, et l'on date par ce fichier plutot que par le nom du
+    dossier : aucune convention de nommage n'entre plus en jeu.
+
+    Les archives que personne ne revendique - celles d'avant ce marqueur - ne
+    sont supprimees qu'a deux conditions reunies : etre plus vieilles que
+    JOURS_ARCHIVES_ORPHELINES, et ne pas figurer parmi les
+    ARCHIVES_A_CONSERVER plus recentes. Un greffon de la suite qui n'aurait pas
+    encore recu ce correctif garde ainsi ses archives recentes, et le stock
+    ancien se resorbe quand meme.
+
+    Retourne la liste des chemins supprimes, pour que le comportement soit
+    verifiable autrement que par une inspection du dossier.
+    """
+    racine = racine or get_logs_dir()
+    miennes = []
+    orphelines = []
+    try:
+        entrees = os.listdir(racine)
+    except OSError:
+        return []
+    for nom in entrees:
+        chemin = os.path.join(racine, nom)
+        if not os.path.isdir(chemin):
+            continue
+        greffon, date = lire_marque_incident(chemin)
+        if greffon == PLUGIN_ID:
+            miennes.append((date, nom, chemin))
+        elif greffon is None:
+            try:
+                date = os.path.getmtime(chemin)
+            except OSError:
+                date = 0.0
+            orphelines.append((date, nom, chemin))
+    miennes.sort()
+    orphelines.sort()
+    limite = time.time() - JOURS_ARCHIVES_ORPHELINES * 86400
+    condamnees = [chemin for _, _, chemin in miennes[:-ARCHIVES_A_CONSERVER]]
+    condamnees += [chemin for date, _, chemin
+                   in orphelines[:-ARCHIVES_A_CONSERVER] if date < limite]
+    for chemin in condamnees:
+        shutil.rmtree(chemin, ignore_errors=True)
+    return condamnees
+
+
 def archiver_journaux(dossier_travail):
     try:
         racine = get_logs_dir()
         # Deux incidents dans la meme seconde ne doivent pas s'ecraser : le
         # second archivage ecraserait les journaux du premier, et c'est
-        # justement dans une serie d'echecs rapproches qu'ils comptent. Le
-        # nom porte donc les microsecondes, ce qui garde aussi l'ordre
-        # alphabetique identique a l'ordre chronologique : la purge ci-dessous
-        # conserve ainsi les incidents les plus recents.
+        # justement dans une serie d'echecs rapproches qu'ils comptent. Le nom
+        # porte donc les microsecondes. La purge, elle, ne se fie plus au nom :
+        # voir purger_journaux.
         horodatage = "%s-%06d" % (time.strftime("%Y%m%d-%H%M%S"),
                                   time.time_ns() // 1000 % 1000000)
         cible = os.path.join(racine, horodatage)
         os.makedirs(cible, exist_ok=True)
+        ecrire_marque_incident(cible, horodatage)
         for nom in os.listdir(dossier_travail):
             if not (nom.endswith(".log") or nom.endswith(".json") or nom.endswith(".py")):
                 continue
@@ -1601,11 +1607,7 @@ def archiver_journaux(dossier_travail):
                 shutil.copy2(os.path.join(dossier_travail, nom), os.path.join(cible, nom))
             except Exception:
                 pass
-        # Purge au-dela d'une dizaine d'incidents.
-        entrees = sorted(d for d in os.listdir(racine)
-                         if os.path.isdir(os.path.join(racine, d)))
-        for vieux in entrees[:-ARCHIVES_A_CONSERVER]:
-            shutil.rmtree(os.path.join(racine, vieux), ignore_errors=True)
+        purger_journaux(racine)
         return cible
     except Exception as e:
         journal("archivage impossible: %s" % e)
